@@ -88,14 +88,24 @@ fn parse_opts(args: Vec<String>) -> Result<Opts, String> {
 }
 
 fn number<T: std::str::FromStr>(s: &str) -> Result<T, String> {
-    s.parse().map_err(|_| format!("'{s}' is not a valid number"))
+    s.parse()
+        .map_err(|_| format!("'{s}' is not a valid number"))
+}
+
+/// A knob value: GP expects 0..1, so anything outside is clamped.
+fn unit(s: &str) -> Result<f32, String> {
+    let v: f32 = number(s)?;
+    if v.is_nan() {
+        return Err(format!("'{s}' is not a valid number"));
+    }
+    Ok(v.clamp(0.0, 1.0))
 }
 
 /// Text from the command line to an OSC argument: 123 -> int, 0.5 -> float, anything else -> string.
 fn parse_arg(s: &str) -> OscType {
     if let Ok(i) = s.parse::<i32>() {
         OscType::Int(i)
-    } else if let Ok(f) = s.parse::<f32>() {
+    } else if let Some(f) = s.contains('.').then(|| s.parse::<f32>().ok()).flatten() {
         OscType::Float(f)
     } else {
         OscType::String(s.to_string())
@@ -126,29 +136,56 @@ impl Gp {
     fn connect(gp_port: u16, reply_port: u16, wait: Duration) -> Result<Gp, String> {
         // GP sends replies to its configured "remote client" port, not back to the sender,
         // so we must own that port and send from it too.
-        let sock = UdpSocket::bind(("0.0.0.0", reply_port)).map_err(|e| {
+        // Loopback only: no firewall prompt, and nothing on the network can inject "replies".
+        let sock = UdpSocket::bind(("127.0.0.1", reply_port)).map_err(|e| {
             format!(
                 "can't listen on port {reply_port} ({e}). Another program (or another gp-probe) is \
                  using it. Close it, or pick another port with --reply-port and set the same \
                  number as \"Remote client port\" in GP's OSC Setup."
             )
         })?;
-        Ok(Gp { sock, target: SocketAddr::from(([127, 0, 0, 1], gp_port)), wait })
+        Ok(Gp {
+            sock,
+            target: SocketAddr::from(([127, 0, 0, 1], gp_port)),
+            wait,
+        })
     }
 
     /// Send one message and print every reply that arrives until GP goes quiet.
     fn ask(&self, addr: &str, args: Vec<OscType>) -> Result<Vec<OscMessage>, String> {
         self.drain();
         println!("\n-> {} {addr} {}", self.target, show(&args));
-        let packet = OscPacket::Message(OscMessage { addr: addr.to_string(), args });
+        let packet = OscPacket::Message(OscMessage {
+            addr: addr.to_string(),
+            args,
+        });
         let bytes = encoder::encode(&packet).map_err(|e| format!("can't encode message: {e:?}"))?;
         let sent = Instant::now();
-        self.sock.send_to(&bytes, self.target).map_err(|e| format!("send failed: {e}"))?;
+        self.sock
+            .send_to(&bytes, self.target)
+            .map_err(|e| format!("send failed: {e}"))?;
 
         let mut replies = vec![];
         let mut buf = [0u8; 65536];
-        self.sock.set_read_timeout(Some(self.wait)).map_err(|e| e.to_string())?;
-        while let Ok((n, from)) = self.sock.recv_from(&mut buf) {
+        self.sock
+            .set_read_timeout(Some(self.wait))
+            .map_err(|e| e.to_string())?;
+        // Hard cap: widgets that push updates nonstop (e.g. meters) would otherwise never let GP go quiet.
+        let deadline = self.wait + Duration::from_secs(5);
+        while sent.elapsed() < deadline {
+            let (n, from) = match self.sock.recv_from(&mut buf) {
+                Ok(r) => r,
+                // Windows reports this right away when nothing listens on the GP port.
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    println!(
+                        "   Nothing is listening on port {}: Gig Performer isn't running, OSC is \
+                         off, or --gp-port is wrong.",
+                        self.target.port()
+                    );
+                    return Ok(replies);
+                }
+                Err(_) => break,
+            };
             let ms = sent.elapsed().as_millis();
             match decoder::decode_udp(&buf[..n]) {
                 Ok((_, p)) => {
@@ -159,7 +196,10 @@ impl Gp {
                         replies.push(m);
                     }
                 }
-                Err(e) => println!("<- {ms:>5} ms from {from}  undecodable ({e:?}): {:02x?}", &buf[..n.min(64)]),
+                Err(e) => println!(
+                    "<- {ms:>5} ms from {from}  undecodable ({e:?}): {:02x?}",
+                    &buf[..n.min(64)]
+                ),
             }
         }
         if replies.is_empty() {
@@ -205,7 +245,9 @@ fn first_number(replies: &[OscMessage]) -> Option<f64> {
 }
 
 fn arg<'a>(cmd: &'a [String], i: usize, what: &str) -> Result<&'a str, String> {
-    cmd.get(i).map(String::as_str).ok_or(format!("missing {what}. Run gp-probe --help"))
+    cmd.get(i)
+        .map(String::as_str)
+        .ok_or(format!("missing {what}. Run gp-probe --help"))
 }
 
 fn run(o: &Opts) -> Result<(), String> {
@@ -231,32 +273,65 @@ fn run(o: &Opts) -> Result<(), String> {
         }
         "get" => {
             let index: i32 = number(arg(cmd, 2, "parameter index")?)?;
-            drop(gp.ask(&format!("/{}/GetParam", arg(cmd, 1, "plugin handle")?), vec![OscType::Int(index)])?)
+            drop(gp.ask(
+                &format!("/{}/GetParam", arg(cmd, 1, "plugin handle")?),
+                vec![OscType::Int(index)],
+            )?)
         }
-        "value" => drop(gp.ask(&format!("/{}/GetValue", arg(cmd, 1, "widget handle")?), vec![])?),
+        "value" => drop(gp.ask(
+            &format!("/{}/GetValue", arg(cmd, 1, "widget handle")?),
+            vec![],
+        )?),
         "set" => {
-            let (h, index) = (arg(cmd, 1, "plugin handle")?, number::<i32>(arg(cmd, 2, "parameter index")?)?);
-            let value: f32 = number(arg(cmd, 3, "value 0..1")?)?;
-            let before = first_number(&gp.ask(&format!("/{h}/GetParam"), vec![OscType::Int(index)])?);
+            let (h, index) = (
+                arg(cmd, 1, "plugin handle")?,
+                number::<i32>(arg(cmd, 2, "parameter index")?)?,
+            );
+            let value = unit(arg(cmd, 3, "value 0..1")?)?;
+            let before =
+                first_number(&gp.ask(&format!("/{h}/GetParam"), vec![OscType::Int(index)])?);
             undo_hint(before, &format!("set {h} {index}"));
-            gp.ask(&format!("/{h}/SetParam"), vec![OscType::Int(index), OscType::Float(value)])?;
+            gp.ask(
+                &format!("/{h}/SetParam"),
+                vec![OscType::Int(index), OscType::Float(value)],
+            )?;
             gp.ask(&format!("/{h}/GetParam"), vec![OscType::Int(index)])?;
         }
         "setvalue" => {
             let h = arg(cmd, 1, "widget handle")?;
-            let value: f32 = number(arg(cmd, 2, "value 0..1")?)?;
-            undo_hint(first_number(&gp.ask(&format!("/{h}/GetValue"), vec![])?), &format!("setvalue {h}"));
+            let value = unit(arg(cmd, 2, "value 0..1")?)?;
+            undo_hint(
+                first_number(&gp.ask(&format!("/{h}/GetValue"), vec![])?),
+                &format!("setvalue {h}"),
+            );
             gp.ask(&format!("/{h}/SetValue"), vec![OscType::Float(value)])?;
             gp.ask(&format!("/{h}/GetValue"), vec![])?;
         }
         "bypass" => {
             let h = arg(cmd, 1, "plugin handle")?;
             let on: i32 = number(arg(cmd, 2, "0 or 1")?)?;
-            println!("To undo: gp-probe --write bypass {h} {}", 1 - on.clamp(0, 1));
+            // GP has no OSC command to read bypass state, so the undo can only be a guess.
+            println!(
+                "To undo, if it was {} before: gp-probe --write bypass {h} {}",
+                if on == 0 { "bypassed" } else { "enabled" },
+                1 - on.clamp(0, 1)
+            );
             gp.ask(&format!("/{h}/Bypass"), vec![OscType::Int(on)])?;
         }
-        "record" => record(&gp, number(arg(cmd, 1, "seconds")?)?, &o.rec_dir)?,
-        "send" => drop(gp.ask(arg(cmd, 1, "OSC address")?, cmd[2..].iter().map(|s| parse_arg(s)).collect())?),
+        "record" => {
+            let s: f64 = number(arg(cmd, 1, "seconds")?)?;
+            let secs = Duration::try_from_secs_f64(s)
+                .ok()
+                .filter(|d| !d.is_zero())
+                .ok_or(format!(
+                    "'{s}' isn't a usable number of seconds; use something like 3"
+                ))?;
+            record(&gp, secs, &o.rec_dir)?
+        }
+        "send" => drop(gp.ask(
+            arg(cmd, 1, "OSC address")?,
+            cmd[2..].iter().map(|s| parse_arg(s)).collect(),
+        )?),
         other => return Err(format!("unknown command '{other}'. Run gp-probe --help")),
     }
     Ok(())
@@ -265,7 +340,9 @@ fn run(o: &Opts) -> Result<(), String> {
 fn undo_hint(before: Option<f64>, cmd: &str) {
     match before {
         Some(v) => println!("Current value {v}. To undo: gp-probe --write {cmd} {v}"),
-        None => println!("Couldn't read the current value, so there's no undo command. Note it in GP first."),
+        None => println!(
+            "Couldn't read the current value, so there's no undo command. Note it in GP first."
+        ),
     }
 }
 
@@ -275,7 +352,9 @@ fn check(gp: &Gp, plugin: Option<&String>, widget: Option<&String>) -> Result<()
     gp.ask("/RackSpace/ListOSCPlugins", vec![])?;
     match plugin {
         Some(h) => params(gp, h, 8)?,
-        None => println!("\n(skipped plugin checks: pass a plugin handle, e.g. gp-probe check Amp Gain)"),
+        None => println!(
+            "\n(skipped plugin checks: pass a plugin handle, e.g. gp-probe check Amp Gain)"
+        ),
     }
     match widget {
         Some(w) => drop(gp.ask(&format!("/{w}/GetValue"), vec![])?),
@@ -291,7 +370,10 @@ fn params(gp: &Gp, handle: &str, max: i32) -> Result<(), String> {
         println!("   No parameter count came back, so skipping the values.");
         return Ok(());
     };
-    println!("   {handle} has {count} parameters; reading the first {}", count.min(max));
+    println!(
+        "   {handle} has {count} parameters; reading the first {}",
+        count.min(max)
+    );
     for i in 0..count.min(max) {
         gp.ask(&format!("/{handle}/GetParam"), vec![OscType::Int(i)])?;
     }
@@ -301,7 +383,9 @@ fn params(gp: &Gp, handle: &str, max: i32) -> Result<(), String> {
 type Snapshot = HashMap<PathBuf, (u64, SystemTime)>;
 
 fn wav_files(dir: &Path, out: &mut Snapshot) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
@@ -316,20 +400,26 @@ fn wav_files(dir: &Path, out: &mut Snapshot) {
 
 /// Files that are new or changed since `before`.
 fn changed(before: &Snapshot, now: &Snapshot) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> =
-        now.iter().filter(|(p, s)| before.get(*p) != Some(s)).map(|(p, _)| p.clone()).collect();
+    let mut v: Vec<PathBuf> = now
+        .iter()
+        .filter(|(p, s)| before.get(*p) != Some(s))
+        .map(|(p, _)| p.clone())
+        .collect();
     v.sort();
     v
 }
 
-fn record(gp: &Gp, seconds: f64, dir: &Path) -> Result<(), String> {
+fn record(gp: &Gp, seconds: Duration, dir: &Path) -> Result<(), String> {
     if !dir.is_dir() {
-        println!("Warning: {} doesn't exist yet. If GP saves elsewhere, pass --rec-dir.", dir.display());
+        println!(
+            "Warning: {} doesn't exist yet. If GP saves elsewhere, pass --rec-dir.",
+            dir.display()
+        );
     }
     let mut before = Snapshot::new();
     wav_files(dir, &mut before);
     gp.ask("/RecordInputs", vec![OscType::Int(1)])?;
-    thread::sleep(Duration::from_secs_f64(seconds));
+    thread::sleep(seconds);
     gp.ask("/RecordInputs", vec![OscType::Int(0)])?;
     let stopped = Instant::now();
 
@@ -340,7 +430,11 @@ fn record(gp: &Gp, seconds: f64, dir: &Path) -> Result<(), String> {
         wav_files(dir, &mut now);
         let new = changed(&before, &now);
         if !new.is_empty() && now == last {
-            println!("\nRecorder wrote {} file(s), finished {} ms after stop:", new.len(), stopped.elapsed().as_millis());
+            println!(
+                "\nRecorder wrote {} file(s), finished {} ms after stop:",
+                new.len(),
+                stopped.elapsed().as_millis()
+            );
             for p in new {
                 println!("   {}  ({} bytes)", p.display(), now[&p].0);
             }
@@ -349,7 +443,10 @@ fn record(gp: &Gp, seconds: f64, dir: &Path) -> Result<(), String> {
         last = now;
         thread::sleep(Duration::from_millis(300));
     }
-    println!("\nNo new WAV files in {} after 15 s. Check the recorder has inputs/outputs ticked.", dir.display());
+    println!(
+        "\nNo new WAV files in {} after 15 s. Check the recorder has inputs/outputs ticked.",
+        dir.display()
+    );
     Ok(())
 }
 
@@ -362,6 +459,34 @@ mod tests {
         assert_eq!(parse_arg("3"), OscType::Int(3));
         assert_eq!(parse_arg("0.5"), OscType::Float(0.5));
         assert_eq!(parse_arg("Amp"), OscType::String("Amp".into()));
+        assert_eq!(parse_arg("inf"), OscType::String("inf".into()));
+        assert_eq!(unit("5").unwrap(), 1.0);
+        assert!(unit("nan").is_err());
+    }
+
+    #[test]
+    fn ask_gives_up_when_gp_never_goes_quiet() {
+        let chatty_gp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let gp = Gp::connect(
+            chatty_gp.local_addr().unwrap().port(),
+            0,
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let reply_to = gp.sock.local_addr().unwrap();
+        let meter = encoder::encode(&OscPacket::Message(OscMessage {
+            addr: "/Meter/Value".into(),
+            args: vec![OscType::Float(0.5)],
+        }))
+        .unwrap();
+        thread::spawn(move || {
+            while chatty_gp.send_to(&meter, reply_to).is_ok() {
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = Instant::now();
+        gp.ask("/RackSpace/ListOSCWidgets", vec![]).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(7));
     }
 
     #[test]
@@ -375,21 +500,33 @@ mod tests {
             let mut buf = [0u8; 1024];
             let (n, _) = fake_gp.recv_from(&mut buf).unwrap();
             let (_, p) = decoder::decode_udp(&buf[..n]).unwrap();
-            assert!(matches!(p, OscPacket::Message(ref m) if m.addr == "/RackSpace/ListOSCWidgets"));
+            assert!(
+                matches!(p, OscPacket::Message(ref m) if m.addr == "/RackSpace/ListOSCWidgets")
+            );
             let msg = |name: &str| {
-                OscPacket::Message(OscMessage { addr: "/Widget".into(), args: vec![OscType::String(name.into())] })
+                OscPacket::Message(OscMessage {
+                    addr: "/Widget".into(),
+                    args: vec![OscType::String(name.into())],
+                })
             };
-            fake_gp.send_to(&encoder::encode(&msg("Gain")).unwrap(), reply_to).unwrap();
+            fake_gp
+                .send_to(&encoder::encode(&msg("Gain")).unwrap(), reply_to)
+                .unwrap();
             let bundle = OscPacket::Bundle(rosc::OscBundle {
                 timetag: (0, 1).into(),
                 content: vec![msg("Bass"), msg("Treble")],
             });
-            fake_gp.send_to(&encoder::encode(&bundle).unwrap(), reply_to).unwrap();
+            fake_gp
+                .send_to(&encoder::encode(&bundle).unwrap(), reply_to)
+                .unwrap();
         });
 
         let replies = gp.ask("/RackSpace/ListOSCWidgets", vec![]).unwrap();
         server.join().unwrap();
-        let names: Vec<_> = replies.iter().map(|m| m.args[0].clone().string().unwrap()).collect();
+        let names: Vec<_> = replies
+            .iter()
+            .map(|m| m.args[0].clone().string().unwrap())
+            .collect();
         assert_eq!(names, ["Gain", "Bass", "Treble"]);
     }
 
@@ -397,8 +534,11 @@ mod tests {
     fn changed_finds_new_and_grown_files() {
         let t = SystemTime::UNIX_EPOCH;
         let before: Snapshot = [(PathBuf::from("a.wav"), (10, t))].into();
-        let now: Snapshot =
-            [(PathBuf::from("a.wav"), (10, t)), (PathBuf::from("O_Out.wav"), (5, t))].into();
+        let now: Snapshot = [
+            (PathBuf::from("a.wav"), (10, t)),
+            (PathBuf::from("O_Out.wav"), (5, t)),
+        ]
+        .into();
         assert_eq!(changed(&before, &now), [PathBuf::from("O_Out.wav")]);
         let grown: Snapshot = [(PathBuf::from("a.wav"), (20, t))].into();
         assert_eq!(changed(&before, &grown), [PathBuf::from("a.wav")]);
