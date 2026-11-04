@@ -6,10 +6,10 @@ use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 
-/// Decode an audio or video file (wav, mp3, flac, ogg, m4a/mp4, mkv) to mono samples.
-/// shortcut: no Opus decoder, so most .webm/.opus files fail; add one if users need YouTube downloads.
-/// Returns (samples, sample rate).
-pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
+/// Decode an audio or video file (wav, mp3, flac, ogg, m4a/mp4, mkv), handing mono samples to `sink`
+/// piece by piece so the whole file never sits in memory. Returns the sample rate.
+/// shortcut: no Opus decoder, so local .webm/.opus files fail; add one if users drop those files often.
+pub fn decode(path: &Path, mut sink: impl FnMut(&[f32])) -> Result<u32, String> {
     let file = File::open(path).map_err(|e| format!("Can't open the file: {e}"))?;
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -17,23 +17,35 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
         hint.with_extension(ext);
     }
     let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+        .probe(
+            &hint,
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
         .map_err(|_| "GigEyes can't read this file type.".to_string())?;
 
-    let track = format.default_track(TrackType::Audio).ok_or("This file has no audio.")?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or("This file has no audio.")?;
     let track_id = track.id;
-    let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or("This file has no audio.")?;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or("This file has no audio.")?;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(|_| "GigEyes can't decode this audio format.".to_string())?;
 
-    let (mut mono, mut rate, mut frame) = (Vec::new(), 0, Vec::<f32>::new());
+    let (mut rate, mut decoded) = (0, 0usize);
+    let (mut frame, mut mono) = (Vec::<f32>::new(), Vec::<f32>::new());
     loop {
         let packet = match format.next_packet() {
             Ok(Some(p)) => p,
             Ok(None) => break,
             // A damaged tail shouldn't throw away everything decoded so far.
-            Err(_) if !mono.is_empty() => break,
+            Err(_) if decoded > 0 => break,
             Err(e) => return Err(format!("Couldn't read the audio: {e}")),
         };
         if packet.track_id != track_id {
@@ -45,16 +57,23 @@ pub fn decode(path: &Path) -> Result<(Vec<f32>, u32), String> {
                 let channels = audio.spec().channels().count().max(1);
                 frame.resize(audio.samples_interleaved(), 0.0);
                 audio.copy_to_slice_interleaved(&mut frame);
-                mono.extend(frame.chunks(channels).map(|f| f.iter().sum::<f32>() / channels as f32));
+                mono.clear();
+                mono.extend(
+                    frame
+                        .chunks(channels)
+                        .map(|f| f.iter().sum::<f32>() / channels as f32),
+                );
+                decoded += mono.len();
+                sink(&mono);
             }
             Err(Error::DecodeError(_)) => continue, // skip a corrupt packet, keep going
             Err(e) => return Err(format!("Couldn't decode the audio: {e}")),
         }
     }
-    if mono.is_empty() || rate == 0 {
+    if decoded == 0 || rate == 0 {
         return Err("This file has no audio.".into());
     }
-    Ok((mono, rate))
+    Ok(rate)
 }
 
 #[cfg(test)]
@@ -88,19 +107,23 @@ mod tests {
     fn decodes_wav_to_mono_with_its_rate() {
         let path = std::env::temp_dir().join("gigeyes_decode_test.wav");
         write_wav(&path, 1000, 44_100);
-        let (mono, rate) = decode(&path).unwrap();
+        let mut mono = vec![];
+        let rate = decode(&path, |piece| mono.extend_from_slice(piece)).unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!((mono.len(), rate), (1000, 44_100));
-        assert!((mono[500] - 0.125).abs() < 1e-3, "mono mix was {}", mono[500]);
+        assert!(
+            (mono[500] - 0.125).abs() < 1e-3,
+            "mono mix was {}",
+            mono[500]
+        );
     }
 
     #[test]
     fn non_audio_gives_a_plain_error() {
         let path = std::env::temp_dir().join("gigeyes_not_audio.txt");
         std::fs::write(&path, "hello").unwrap();
-        let err = decode(&path).unwrap_err();
+        let err = decode(&path, |_| {}).unwrap_err();
         std::fs::remove_file(&path).ok();
         assert_eq!(err, "GigEyes can't read this file type.");
     }
 }
-

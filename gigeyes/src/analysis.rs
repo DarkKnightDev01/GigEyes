@@ -1,6 +1,6 @@
 //! Describes a guitar tone from audio: EQ shape, brightness and how compressed or driven it sounds.
 
-use realfft::RealFftPlanner;
+use realfft::{RealFftPlanner, RealToComplex};
 
 const FFT: usize = 4096;
 const BANDS: usize = 24;
@@ -20,9 +20,105 @@ pub struct Tone {
     pub summary: Vec<String>,
 }
 
-pub fn analyze(samples: &[f32], rate: u32) -> Tone {
+/// Samples per loudness block for the peak-to-average measure.
+const BLOCK: usize = 2048;
+
+/// Builds a Tone from audio fed in pieces, so a long concert never sits in memory whole.
+pub struct Analyzer {
+    fft: std::sync::Arc<dyn RealToComplex<f32>>,
+    window: Vec<f32>,
+    input: Vec<f32>,
+    output: Vec<realfft::num_complex::Complex<f32>>,
+    /// Summed power spectrum of all full FFT frames so far.
+    power: Vec<f32>,
+    frames: usize,
+    /// Samples not yet used up by FFT frames (frames overlap by half).
+    pending: Vec<f32>,
+    /// Loudness (RMS) of each finished block, plus the block being filled.
+    loudness: Vec<f32>,
+    block_sum: f32,
+    block_len: usize,
+    peak: f32,
+    total: usize,
+}
+
+impl Analyzer {
+    pub fn new() -> Self {
+        let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FFT);
+        let (input, output) = (fft.make_input_vec(), fft.make_output_vec());
+        Self {
+            window: (0..FFT)
+                .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FFT as f32).cos())
+                .collect(),
+            power: vec![0.0; output.len()],
+            fft,
+            input,
+            output,
+            frames: 0,
+            pending: Vec::with_capacity(FFT * 2),
+            loudness: vec![],
+            block_sum: 0.0,
+            block_len: 0,
+            peak: 0.0,
+            total: 0,
+        }
+    }
+
+    pub fn push(&mut self, samples: &[f32]) {
+        for &s in samples {
+            self.peak = self.peak.max(s.abs());
+            self.block_sum += s * s;
+            self.block_len += 1;
+            if self.block_len == BLOCK {
+                self.end_block();
+            }
+        }
+        self.total += samples.len();
+        self.pending.extend_from_slice(samples);
+        while self.pending.len() >= FFT {
+            self.add_frame();
+            self.pending.drain(..FFT / 2);
+        }
+    }
+
+    pub fn finish(mut self, rate: u32) -> Tone {
+        if self.frames == 0 {
+            self.add_frame(); // shorter than one frame: use what there is, zero-padded
+        }
+        if self.block_len > 0 {
+            self.end_block();
+        }
+        let frames = self.frames as f32;
+        self.power.iter_mut().for_each(|p| *p /= frames);
+        let crest_db = crest(&self.loudness, self.peak);
+        describe(self.power, crest_db, self.total as f32 / rate as f32, rate)
+    }
+
+    /// Hann-windowed FFT of the first FFT samples of `pending`, added to the running spectrum.
+    fn add_frame(&mut self) {
+        for (i, (x, w)) in self.input.iter_mut().zip(&self.window).enumerate() {
+            *x = self.pending.get(i).copied().unwrap_or(0.0) * w;
+        }
+        self.fft
+            .process(&mut self.input, &mut self.output)
+            .expect("buffer sizes come from the planner");
+        self.power
+            .iter_mut()
+            .zip(&self.output)
+            .for_each(|(p, c)| *p += c.norm_sqr());
+        self.frames += 1;
+    }
+
+    fn end_block(&mut self) {
+        self.loudness
+            .push((self.block_sum / self.block_len as f32).sqrt());
+        self.block_sum = 0.0;
+        self.block_len = 0;
+    }
+}
+
+fn describe(power: Vec<f32>, crest_db: f32, seconds: f32, rate: u32) -> Tone {
     let rate_f = rate as f32;
-    let power = average_spectrum(samples);
     let bin_hz = rate_f / FFT as f32;
 
     // Band energy from the cumulative spectrum, so bands narrower than one FFT bin still get a value.
@@ -40,8 +136,9 @@ pub fn analyze(samples: &[f32], rate: u32) -> Tone {
         cumulative[i] + (next - cumulative[i]) * frac
     };
     let high = HIGH_HZ.min(rate_f * 0.45);
-    let edges: Vec<f32> =
-        (0..=BANDS).map(|i| LOW_HZ * (high / LOW_HZ).powf(i as f32 / BANDS as f32)).collect();
+    let edges: Vec<f32> = (0..=BANDS)
+        .map(|i| LOW_HZ * (high / LOW_HZ).powf(i as f32 / BANDS as f32))
+        .collect();
     let mut levels_db: Vec<f32> = edges
         .windows(2)
         .map(|w| 10.0 * ((energy_below(w[1]) - energy_below(w[0])) / (w[1] - w[0]) + 1e-12).log10())
@@ -50,15 +147,29 @@ pub fn analyze(samples: &[f32], rate: u32) -> Tone {
     levels_db.iter_mut().for_each(|l| *l -= mean);
     let centers: Vec<f32> = edges.windows(2).map(|w| (w[0] * w[1]).sqrt()).collect();
 
-    let tilt_db_per_octave = slope(&centers.iter().map(|c| c.log2()).collect::<Vec<_>>(), &levels_db);
-    let crest_db = crest(samples);
+    let tilt_db_per_octave = slope(
+        &centers.iter().map(|c| c.log2()).collect::<Vec<_>>(),
+        &levels_db,
+    );
     let region = |lo: f32, hi: f32| {
-        let v: Vec<f32> =
-            centers.iter().zip(&levels_db).filter(|(c, _)| **c >= lo && **c < hi).map(|(_, l)| *l).collect();
-        if v.is_empty() { 0.0 } else { v.iter().sum::<f32>() / v.len() as f32 }
+        let v: Vec<f32> = centers
+            .iter()
+            .zip(&levels_db)
+            .filter(|(c, _)| **c >= lo && **c < hi)
+            .map(|(_, l)| *l)
+            .collect();
+        if v.is_empty() {
+            0.0
+        } else {
+            v.iter().sum::<f32>() / v.len() as f32
+        }
     };
-    let (lows, low_mids, mids, highs) =
-        (region(80.0, 250.0), region(250.0, 800.0), region(800.0, 2000.0), region(2000.0, 5000.0));
+    let (lows, low_mids, mids, highs) = (
+        region(80.0, 250.0),
+        region(250.0, 800.0),
+        region(800.0, 2000.0),
+        region(2000.0, 5000.0),
+    );
 
     let mut summary = vec![];
     // shortcut: thresholds are rough guesses for guitar, tune them against real reference tracks.
@@ -74,7 +185,10 @@ pub fn analyze(samples: &[f32], rate: u32) -> Tone {
     });
     let scoop = mids - (low_mids + highs) / 2.0;
     summary.push(if scoop < -4.0 {
-        format!("Scooped mids: 800 Hz–2 kHz sits {:.0} dB below its neighbours.", -scoop)
+        format!(
+            "Scooped mids: 800 Hz–2 kHz sits {:.0} dB below its neighbours.",
+            -scoop
+        )
     } else if scoop > 3.0 {
         format!("Mid-forward: 800 Hz–2 kHz sits {scoop:.0} dB above its neighbours.")
     } else {
@@ -93,36 +207,9 @@ pub fn analyze(samples: &[f32], rate: u32) -> Tone {
         levels_db,
         tilt_db_per_octave,
         crest_db,
-        seconds: samples.len() as f32 / rate_f,
+        seconds,
         summary,
     }
-}
-
-/// Average power spectrum over Hann-windowed frames with 50% overlap.
-fn average_spectrum(samples: &[f32]) -> Vec<f32> {
-    let fft = RealFftPlanner::<f32>::new().plan_fft_forward(FFT);
-    let window: Vec<f32> =
-        (0..FFT).map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / FFT as f32).cos()).collect();
-    let mut input = fft.make_input_vec();
-    let mut output = fft.make_output_vec();
-    let mut power = vec![0.0f32; output.len()];
-    let mut frames = 0;
-    let mut start = 0;
-    loop {
-        let chunk = &samples[start.min(samples.len())..(start + FFT).min(samples.len())];
-        input.iter_mut().zip(&window).enumerate().for_each(|(i, (x, w))| {
-            *x = chunk.get(i).copied().unwrap_or(0.0) * w;
-        });
-        fft.process(&mut input, &mut output).expect("buffer sizes come from the planner");
-        power.iter_mut().zip(&output).for_each(|(p, c)| *p += c.norm_sqr());
-        frames += 1;
-        start += FFT / 2;
-        if start + FFT > samples.len() {
-            break;
-        }
-    }
-    power.iter_mut().for_each(|p| *p /= frames as f32);
-    power
 }
 
 /// Least-squares slope of y over x.
@@ -134,23 +221,44 @@ fn slope(x: &[f32], y: &[f32]) -> f32 {
     if var == 0.0 { 0.0 } else { cov / var }
 }
 
-/// Peak-to-RMS in dB, ignoring near-silent stretches so gaps between notes don't inflate it.
-fn crest(samples: &[f32]) -> f32 {
-    let rms: Vec<f32> =
-        samples.chunks(2048).map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len() as f32).sqrt()).collect();
-    let loudest = rms.iter().cloned().fold(0.0, f32::max);
-    let active: Vec<f32> = rms.into_iter().filter(|r| *r > loudest * 0.05).collect();
+/// Peak-to-RMS in dB, ignoring near-silent blocks so gaps between notes don't inflate it.
+fn crest(loudness: &[f32], peak: f32) -> f32 {
+    let loudest = loudness.iter().cloned().fold(0.0, f32::max);
+    let active: Vec<f32> = loudness
+        .iter()
+        .cloned()
+        .filter(|r| *r > loudest * 0.05)
+        .collect();
     if active.is_empty() {
         return 0.0;
     }
     let level = (active.iter().map(|r| r * r).sum::<f32>() / active.len() as f32).sqrt();
-    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     20.0 * (peak / level).log10()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn analyze(samples: &[f32], rate: u32) -> Tone {
+        let mut a = Analyzer::new();
+        a.push(samples);
+        a.finish(rate)
+    }
+
+    #[test]
+    fn feeding_in_pieces_gives_the_same_tone_as_all_at_once() {
+        let x = plucks(10.0);
+        let whole = analyze(&x, RATE);
+        let mut a = Analyzer::new();
+        x.chunks(1000).for_each(|c| a.push(c)); // odd size, so blocks and frames straddle pieces
+        let pieces = a.finish(RATE);
+        assert_eq!(whole.levels_db, pieces.levels_db);
+        assert_eq!(
+            (whole.crest_db, whole.seconds),
+            (pieces.crest_db, pieces.seconds)
+        );
+    }
 
     const RATE: u32 = 48_000;
 
@@ -167,7 +275,12 @@ mod tests {
     fn lowpass(x: &[f32], hz: f32) -> Vec<f32> {
         let a = (-std::f32::consts::TAU * hz / RATE as f32).exp();
         let mut y = 0.0;
-        x.iter().map(|s| { y = (1.0 - a) * s + a * y; y }).collect()
+        x.iter()
+            .map(|s| {
+                y = (1.0 - a) * s + a * y;
+                y
+            })
+            .collect()
     }
 
     /// Plucked low E: a decaying sine every half second.
@@ -185,8 +298,15 @@ mod tests {
     fn darker_audio_has_a_steeper_tilt_and_says_so() {
         let white = analyze(&noise(RATE as usize * 2), RATE);
         // Two filters in a row: -12 dB per octave above 300 Hz, like a dark speaker cab.
-        let dark = analyze(&lowpass(&lowpass(&noise(RATE as usize * 2), 300.0), 300.0), RATE);
-        assert!(white.tilt_db_per_octave > -1.0, "white noise is flat: {}", white.tilt_db_per_octave);
+        let dark = analyze(
+            &lowpass(&lowpass(&noise(RATE as usize * 2), 300.0), 300.0),
+            RATE,
+        );
+        assert!(
+            white.tilt_db_per_octave > -1.0,
+            "white noise is flat: {}",
+            white.tilt_db_per_octave
+        );
         assert!(dark.tilt_db_per_octave < white.tilt_db_per_octave - 3.0);
         assert!(dark.summary.iter().any(|s| s.starts_with("Dark")));
     }

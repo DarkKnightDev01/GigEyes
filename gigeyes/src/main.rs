@@ -6,21 +6,28 @@ mod decode;
 mod fetch;
 
 use analysis::Tone;
-use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, StrokeKind, Vec2};
+use eframe::egui::{
+    self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, StrokeKind, Vec2,
+};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 const ACCENT: Color32 = Color32::from_rgb(232, 168, 56);
-const AUDIO_TYPES: [&str; 9] = ["wav", "mp3", "flac", "ogg", "m4a", "mp4", "aac", "mkv", "mov"];
+const AUDIO_TYPES: [&str; 9] = [
+    "wav", "mp3", "flac", "ogg", "m4a", "mp4", "aac", "mkv", "mov",
+];
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([720.0, 760.0]).with_min_inner_size([480.0, 420.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([720.0, 760.0])
+            .with_min_inner_size([480.0, 420.0]),
         ..Default::default()
     };
     // A file passed on the command line (or dropped onto gigeyes.exe in Explorer) opens right away.
     let initial = std::env::args_os().nth(1).map(PathBuf::from);
+    fetch::clean_old_downloads(&std::env::temp_dir(), std::time::Duration::from_secs(3600));
     eframe::run_native(
         "GigEyes",
         options,
@@ -54,16 +61,25 @@ struct App {
 }
 
 fn file_name(path: &std::path::Path) -> String {
-    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 fn read_tone(path: &std::path::Path) -> Outcome {
-    decode::decode(path).map(|(samples, rate)| (file_name(path), analysis::analyze(&samples, rate)))
+    let mut analyzer = analysis::Analyzer::new();
+    let rate = decode::decode(path, |piece| analyzer.push(piece))?;
+    Ok((file_name(path), analyzer.finish(rate)))
 }
 
 impl App {
     /// Run `job` off the UI thread (decoding a song takes a moment) and show `label` meanwhile.
-    fn start(&mut self, label: String, ctx: &egui::Context, job: impl FnOnce() -> Outcome + Send + 'static) {
+    fn start(
+        &mut self,
+        label: String,
+        ctx: &egui::Context,
+        job: impl FnOnce() -> Outcome + Send + 'static,
+    ) {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         thread::spawn(move || {
@@ -75,7 +91,9 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
-        self.start(format!("Reading {}…", file_name(&path)), ctx, move || read_tone(&path));
+        self.start(format!("Reading {}…", file_name(&path)), ctx, move || {
+            read_tone(&path)
+        });
     }
 
     fn open_link(&mut self, ctx: &egui::Context) {
@@ -83,11 +101,15 @@ impl App {
             Ok(link) => link.to_string(),
             Err(e) => return self.state = State::Failed(e),
         };
-        self.start("Downloading the audio and reading it…".into(), ctx, move || {
-            // The folder and the download are deleted when `temp` goes out of scope, even on errors.
-            let temp = fetch::TempDir::new()?;
-            read_tone(&fetch::download(&link, &temp.0)?)
-        });
+        self.start(
+            "Downloading the audio and reading it…".into(),
+            ctx,
+            move || {
+                // The folder and the download are deleted when `temp` goes out of scope, even on errors.
+                let temp = fetch::TempDir::new()?;
+                read_tone(&fetch::download(&link, &temp.0)?)
+            },
+        );
     }
 }
 
@@ -103,7 +125,9 @@ impl eframe::App for App {
             };
             self.result = None;
         }
-        if let Some(path) = ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf())) {
+        if let Some(path) =
+            ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()))
+        {
             self.open(path, &ctx);
         }
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
@@ -165,7 +189,11 @@ impl eframe::App for App {
 
 /// The big "drop a file here" area. Returns true when its button was clicked.
 fn drop_zone(ui: &mut egui::Ui, hovering: bool) -> bool {
-    let stroke = if hovering { Stroke::new(2.0, ACCENT) } else { Stroke::new(1.0, ui.visuals().weak_text_color()) };
+    let stroke = if hovering {
+        Stroke::new(2.0, ACCENT)
+    } else {
+        Stroke::new(1.0, ui.visuals().weak_text_color())
+    };
     egui::Frame::new()
         .stroke(stroke)
         .corner_radius(CornerRadius::same(12))
@@ -175,9 +203,10 @@ fn drop_zone(ui: &mut egui::Ui, hovering: bool) -> bool {
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new("Drop an audio or video file here").size(17.0));
                 ui.add_space(4.0);
-                ui.label(RichText::new("wav, mp3, flac, ogg, m4a, mp4, mkv").size(13.0).weak());
+                ui.label(RichText::new(AUDIO_TYPES.join(", ")).size(13.0).weak());
                 ui.add_space(14.0);
-                ui.button(RichText::new("Choose file…").size(15.0)).clicked()
+                ui.button(RichText::new("Choose file…").size(15.0))
+                    .clicked()
             })
             .inner
         })
@@ -211,18 +240,33 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone) {
     let painter = ui.painter_at(rect);
     let plot = rect.shrink2(Vec2::new(0.0, 16.0));
     let visuals = ui.visuals();
-    painter.rect_stroke(rect, 8.0, Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color), StrokeKind::Inside);
+    painter.rect_stroke(
+        rect,
+        8.0,
+        Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color),
+        StrokeKind::Inside,
+    );
 
     let range_db = tone.levels_db.iter().fold(12.0f32, |m, l| m.max(l.abs()));
     let mid_y = plot.center().y;
     let y_for = |db: f32| mid_y - db / range_db * plot.height() / 2.0;
-    painter.line_segment([plot.left_center(), plot.right_center()], Stroke::new(1.0, visuals.weak_text_color()));
+    painter.line_segment(
+        [plot.left_center(), plot.right_center()],
+        Stroke::new(1.0, visuals.weak_text_color()),
+    );
 
     let slot = plot.width() / tone.levels_db.len() as f32;
     for (i, db) in tone.levels_db.iter().enumerate() {
         let x = plot.left() + slot * (i as f32 + 0.5);
-        let (top, bottom) = if *db >= 0.0 { (y_for(*db), mid_y) } else { (mid_y, y_for(*db)) };
-        let bar = egui::Rect::from_x_y_ranges(x - slot * 0.35..=x + slot * 0.35, top..=bottom.max(top + 1.0));
+        let (top, bottom) = if *db >= 0.0 {
+            (y_for(*db), mid_y)
+        } else {
+            (mid_y, y_for(*db))
+        };
+        let bar = egui::Rect::from_x_y_ranges(
+            x - slot * 0.35..=x + slot * 0.35,
+            top..=bottom.max(top + 1.0),
+        );
         painter.rect_filled(bar, 2.0, ACCENT);
     }
     for (hz, label) in [(100.0, "100 Hz"), (1000.0, "1 kHz"), (10_000.0, "10 kHz")] {
