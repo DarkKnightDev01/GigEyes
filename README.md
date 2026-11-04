@@ -12,44 +12,78 @@ Early work in progress. The plan, in order:
 6. Gig Performer extension for knob names
 7. Training the AI on your own runs
 
-## Download
+## Requirements
 
-Grab `gp-probe.exe` and `gigeyes.exe` from the newest pre-release on the [Releases page](https://github.com/DarkKnightDev01/GigEyes/releases). These are pre-alpha: expect rough edges.
+- Windows 10 or 11
+- Gig Performer 5 **Pro** (OSC, which GigEyes uses to talk to Gig Performer, is a Pro feature)
+
+## Install
+
+GigEyes is pre-alpha: expect rough edges. There's no installer yet.
+
+1. Open the [Releases page](https://github.com/DarkKnightDev01/GigEyes/releases) and download `gp-probe.exe` and `gigeyes.exe` from the newest pre-release.
+2. Put both in one folder, e.g. `C:\GigEyes`.
+3. The first time you run them, Windows may show "Windows protected your PC", because the files aren't code-signed yet. Click **More info → Run anyway**.
 
 Builds of every push, between releases, are under **Actions → Windows build → a run → Artifacts**.
 
-## Testing the Gig Performer link with gp-probe
+## Set up Gig Performer
+
+In Gig Performer go to **Options → OSC Setup**:
+
+| Setting | Value |
+|---|---|
+| Enable OSC | on |
+| Remote client IP address | `127.0.0.1` |
+| Remote client port | `54345` |
+| Gig Performer listening port | `7344` |
+
+Then close the settings window. If Gig Performer shows **"OSC Listening Failure"**, another program holds that port. Pick another number, such as `7345`, and use it with `--gp-port` below.
+
+Why `7344` and not the default `54344`: Windows can hand ports above 49152 to any program at random, so the default is sometimes taken.
+
+## Test the Gig Performer link with gp-probe
 
 Use a throwaway gig, not your live one.
 
-1. **OSC setup:** in Gig Performer go to **Options → OSC Setup**:
-   - Turn on **Enable OSC**.
-   - Set **Remote client IP** to `127.0.0.1` and **Remote client port** to `54345`.
-   - Note the **Gig Performer listening port**. If it isn't `54344`, add `--gp-port <yours>` to every command below.
-2. **Rackspace:** make one with an amp plugin and one widget mapped to one of its knobs.
-   - Right-click the amp plugin, give it an OSC/GPScript handle (e.g. `Amp`) and make sure OSC is enabled for it.
-   - In the widget's properties, tick **Enable OSC** and give it a handle (e.g. `Gain`).
-3. Open a terminal in the folder with `gp-probe.exe` and run:
+1. **Rackspace:** add one plugin and map one widget to one of its knobs.
+   - Give the plugin an OSC handle: right-click it in the Wiring view and set its OSC/GPScript handle, e.g. `Amp`.
+   - In the widget's properties, tick **Enable OSC** and give it a handle, e.g. `Gain`.
+2. **Check (read-only):** open PowerShell in your GigEyes folder (Shift + right-click in the folder → "Open PowerShell window here") and run:
 
    ```
-   .\gp-probe.exe check Amp Gain
+   .\gp-probe.exe --gp-port 7344 check Amp Gain
    ```
 
-   This only reads. Send back everything it prints.
-4. If step 3 got replies, try one change, then put it back with the undo command it prints:
+   Use your own handles instead of `Amp` and `Gain`. This changes nothing. Send back everything it prints.
+3. **Change one knob,** then put it back with the undo command it prints:
 
    ```
-   .\gp-probe.exe --write set Amp 0 0.5
+   .\gp-probe.exe --gp-port 7344 --write set Amp 0 0.5
    ```
-5. Recording test: tick your outputs in the recorder settings, play something, then run:
+4. **Recording:** in Gig Performer's recorder settings, tick your outputs. Play something, then run:
 
    ```
-   .\gp-probe.exe --write record 3
+   .\gp-probe.exe --gp-port 7344 --write record 3
    ```
 
    It records 3 seconds and lists the files Gig Performer wrote, and how long they took to appear.
 
-`gp-probe --help` lists every command. Anything that changes your gig or writes files needs `--write`.
+`.\gp-probe.exe --help` lists every command. Anything that changes your gig or writes files needs `--write`.
+
+### If it doesn't work
+
+| gp-probe says | What to do |
+|---|---|
+| "Nothing is listening on …" | Gig Performer isn't running, OSC is off, or `--gp-port` doesn't match Gig Performer's listening port. Also check Gig Performer didn't show "OSC Listening Failure". |
+| "NO REPLY after 500 ms" | Gig Performer got the message but answered elsewhere. Check Remote client IP is `127.0.0.1` and Remote client port is `54345`. |
+| "can't listen on port 54345" | Another program holds it. Use another number with `--reply-port` and set the same number as Remote client port in Gig Performer. |
+
+To see which program holds a port (here 7344), run in PowerShell:
+
+```
+Get-NetUDPEndpoint -LocalPort 7344 | ForEach-Object { Get-Process -Id $_.OwningProcess } | Select-Object Id, ProcessName
+```
 
 ## Building from source
 
