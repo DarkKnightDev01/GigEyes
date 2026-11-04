@@ -3,7 +3,7 @@
 
 use rosc::{OscMessage, OscPacket, OscType, decoder, encoder};
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 use std::{env, fs, process, thread};
@@ -29,6 +29,8 @@ Commands that change your rackspace or write files (need --write):
   send <address> [args...]      send any OSC message (123 = int, 0.5 = float, text = string)
 
 Options:
+  --gp-ip <addr>     GP's address (default 127.0.0.1; if GP doesn't answer, try the
+                     \"Gig Performer IP address\" shown in GP's OSC Setup)
   --gp-port <n>      GP's OSC listening port (default 54344)
   --reply-port <n>   port GP sends replies to: GP's \"Remote client port\" (default 54345)
   --wait <ms>        how long to wait after the last reply (default 500)
@@ -37,6 +39,7 @@ Options:
 ";
 
 struct Opts {
+    gp_ip: IpAddr,
     gp_port: u16,
     reply_port: u16,
     wait: Duration,
@@ -56,6 +59,7 @@ fn main() {
 
 fn parse_opts(args: Vec<String>) -> Result<Opts, String> {
     let mut o = Opts {
+        gp_ip: Ipv4Addr::LOCALHOST.into(),
         gp_port: 54344,
         reply_port: 54345,
         wait: Duration::from_millis(500),
@@ -69,6 +73,12 @@ fn parse_opts(args: Vec<String>) -> Result<Opts, String> {
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or(format!("{name} needs a value"));
         match a.as_str() {
+            "--gp-ip" => {
+                let v = value(&a)?;
+                o.gp_ip = v
+                    .parse()
+                    .map_err(|_| format!("'{v}' is not an IP address"))?
+            }
             "--gp-port" => o.gp_port = number(&value(&a)?)?,
             "--reply-port" => o.reply_port = number(&value(&a)?)?,
             "--wait" => o.wait = Duration::from_millis(number(&value(&a)?)?),
@@ -133,22 +143,24 @@ struct Gp {
 }
 
 impl Gp {
-    fn connect(gp_port: u16, reply_port: u16, wait: Duration) -> Result<Gp, String> {
+    fn connect(target: SocketAddr, reply_port: u16, wait: Duration) -> Result<Gp, String> {
         // GP sends replies to its configured "remote client" port, not back to the sender,
         // so we must own that port and send from it too.
-        // Loopback only: no firewall prompt, and nothing on the network can inject "replies".
-        let sock = UdpSocket::bind(("127.0.0.1", reply_port)).map_err(|e| {
+        // Loopback when GP is on loopback: no firewall prompt, no "replies" injected from the
+        // network. A loopback-bound socket can't send to GP's network address, so then use all.
+        let bind_ip = if target.ip().is_loopback() {
+            Ipv4Addr::LOCALHOST
+        } else {
+            Ipv4Addr::UNSPECIFIED
+        };
+        let sock = UdpSocket::bind((bind_ip, reply_port)).map_err(|e| {
             format!(
                 "can't listen on port {reply_port} ({e}). Another program (or another gp-probe) is \
                  using it. Close it, or pick another port with --reply-port and set the same \
                  number as \"Remote client port\" in GP's OSC Setup."
             )
         })?;
-        Ok(Gp {
-            sock,
-            target: SocketAddr::from(([127, 0, 0, 1], gp_port)),
-            wait,
-        })
+        Ok(Gp { sock, target, wait })
     }
 
     /// Send one message and print every reply that arrives until GP goes quiet.
@@ -178,9 +190,10 @@ impl Gp {
                 // Windows reports this right away when nothing listens on the GP port.
                 Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                     println!(
-                        "   Nothing is listening on port {}: Gig Performer isn't running, OSC is \
-                         off, or --gp-port is wrong.",
-                        self.target.port()
+                        "   Nothing is listening on {}: Gig Performer isn't running, OSC is off, \
+                         or GP listens elsewhere (try --gp-ip with the \"Gig Performer IP \
+                         address\" from GP's OSC Setup, or check --gp-port).",
+                        self.target
                     );
                     return Ok(replies);
                 }
@@ -260,8 +273,11 @@ fn run(o: &Opts) -> Result<(), String> {
             cmd[0]
         ));
     }
-    println!("GP port {}, reply port {}", o.gp_port, o.reply_port);
-    let gp = Gp::connect(o.gp_port, o.reply_port, o.wait)?;
+    println!(
+        "GP at {}:{}, reply port {}",
+        o.gp_ip, o.gp_port, o.reply_port
+    );
+    let gp = Gp::connect(SocketAddr::new(o.gp_ip, o.gp_port), o.reply_port, o.wait)?;
 
     match cmd[0].as_str() {
         "check" => check(&gp, cmd.get(1), cmd.get(2))?,
@@ -468,7 +484,7 @@ mod tests {
     fn ask_gives_up_when_gp_never_goes_quiet() {
         let chatty_gp = UdpSocket::bind("127.0.0.1:0").unwrap();
         let gp = Gp::connect(
-            chatty_gp.local_addr().unwrap().port(),
+            chatty_gp.local_addr().unwrap(),
             0,
             Duration::from_millis(100),
         )
@@ -492,8 +508,7 @@ mod tests {
     #[test]
     fn ask_collects_every_reply_including_bundles() {
         let fake_gp = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let gp_port = fake_gp.local_addr().unwrap().port();
-        let gp = Gp::connect(gp_port, 0, Duration::from_millis(300)).unwrap();
+        let gp = Gp::connect(fake_gp.local_addr().unwrap(), 0, Duration::from_millis(300)).unwrap();
         let reply_to = SocketAddr::from(([127, 0, 0, 1], gp.sock.local_addr().unwrap().port()));
 
         let server = thread::spawn(move || {
