@@ -26,12 +26,15 @@ jobs:
           path: |
             target/release/gigeyes.exe
             target/release/gp-probe.exe
-      # Run this workflow by hand with a tag to publish the exes as a pre-release.
-      - if: inputs.release != ''
-        run: >-
-          gh release create "$env:TAG" target/release/gigeyes.exe target/release/gp-probe.exe
-          --target "${{ github.sha }}" --prerelease --title "GigEyes $env:TAG (pre-alpha)"
-          --notes-file .github/release-notes.md
+      # Publish a pre-release: run this workflow by hand with a tag, or push to main with a
+      # commit message starting "release: v0.1.0-prealpha.1".
+      - if: inputs.release != '' || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release:'))
+        run: |
+          $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { ($env:MSG -split "`n")[0].Substring(8).Trim() }
+          gh release create $tag target/release/gigeyes.exe target/release/gp-probe.exe `
+            --target $env:GITHUB_SHA --prerelease --title "GigEyes $tag (pre-alpha)" `
+            --notes-file .github/release-notes.md
         env:
-          TAG: ${{ inputs.release }}
+          INPUT_TAG: ${{ inputs.release }}
+          MSG: ${{ github.event.head_commit.message }}
           GH_TOKEN: ${{ github.token }}
