@@ -31,7 +31,10 @@ jobs:
       - if: inputs.release != '' || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release:'))
         run: |
           $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { ($env:MSG -split "`n")[0].Substring(8).Trim() }
-          gh release create $tag target/release/gigeyes.exe target/release/gp-probe.exe `
+          # One zip so users download a single file, however many exes there are.
+          $zip = "GigEyes-$tag-windows.zip"
+          Compress-Archive -Path target/release/*.exe, README.md -DestinationPath $zip
+          gh release create $tag $zip `
             --target $env:GITHUB_SHA --prerelease --title "GigEyes $tag (pre-alpha)" `
             --notes-file .github/release-notes.md
         env:

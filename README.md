@@ -21,8 +21,8 @@ Early work in progress. The plan, in order:
 
 GigEyes is pre-alpha: expect rough edges. There's no installer yet.
 
-1. Open the [Releases page](https://github.com/DarkKnightDev01/GigEyes/releases) and download `gp-probe.exe` and `gigeyes.exe` from the newest pre-release.
-2. Put both in one folder, e.g. `C:\GigEyes`.
+1. Open the [Releases page](https://github.com/DarkKnightDev01/GigEyes/releases) and download the `.zip` from the newest pre-release. (`v0.1.0-prealpha.1` has the two `.exe` files separately instead.)
+2. Right-click the zip → **Extract All**, e.g. to `C:\GigEyes`.
 3. The first time you run them, Windows may show "Windows protected your PC", because the files aren't code-signed yet. Click **More info → Run anyway**.
 
 Builds of every push, between releases, are under **Actions → Windows build → a run → Artifacts**.
