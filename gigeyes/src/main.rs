@@ -4,6 +4,8 @@
 mod analysis;
 mod decode;
 mod fetch;
+mod hardware;
+mod research;
 mod rig;
 
 use analysis::{Knob, Tone};
@@ -58,6 +60,7 @@ fn main() -> eframe::Result {
             cc.egui_ctx.style_mut_of(egui::Theme::Dark, theme);
             let mut app = App {
                 rig: rig::load(),
+                tavily_key: research::load_key().unwrap_or_default(),
                 ..App::default()
             };
             if let Some(path) = initial {
@@ -167,6 +170,15 @@ struct App {
     rig: Option<Vec<rig::Plugin>>,
     rig_filter: String,
     rig_error: Option<String>,
+    /// Song research for the current result: the song name, what was found, and a search in flight.
+    song: String,
+    research: Option<research::Research>,
+    research_job: Option<Receiver<Result<research::Research, String>>>,
+    research_note: Option<String>,
+    tavily_key: String,
+    key_note: Option<String>,
+    /// Read once, the first time the rig screen opens.
+    hardware: Option<(hardware::Hardware, hardware::Choice)>,
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -302,6 +314,106 @@ impl App {
             }),
             State::Done(name, tone) => report(ui, name, tone, ease(reveal)),
         }
+        if matches!(self.state, State::Done(..)) {
+            ui.add_space(14.0);
+            self.research_view(ui, ctx);
+        }
+    }
+
+    fn research_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let searching = self.research_job.is_some();
+        card(ui, |ui| {
+            ui.label(semibold("Research this song", 17.0));
+            ui.label(
+                RichText::new("Find interviews, rig rundowns and gear lists for the song. Every source is linked so you can check it.")
+                    .size(13.0)
+                    .weak(),
+            );
+            ui.add_space(10.0);
+            if self.tavily_key.trim().is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("Research needs a free Tavily key.").weak());
+                    if ui.link("Add it in Your rig").clicked() {
+                        self.screen = Screen::Rig;
+                    }
+                });
+                return;
+            }
+            ui.horizontal(|ui| {
+                let button_width = 120.0;
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.song)
+                        .hint_text("Artist - Song")
+                        .margin(Vec2::new(10.0, 7.0))
+                        .desired_width(
+                            ui.available_width() - button_width - ui.spacing().item_spacing.x,
+                        ),
+                );
+                let label = if self.research.is_some() {
+                    "Search again"
+                } else {
+                    "Find sources"
+                };
+                let go = ui.add_enabled(
+                    !searching,
+                    egui::Button::new(label).min_size(Vec2::new(button_width, 0.0)),
+                );
+                if go.clicked() {
+                    let (tx, rx) = mpsc::channel();
+                    let (key, song, ctx) =
+                        (self.tavily_key.clone(), self.song.clone(), ctx.clone());
+                    thread::spawn(move || {
+                        let _ = tx.send(research::search(&key, &song));
+                        ctx.request_repaint();
+                    });
+                    self.research_job = Some(rx);
+                    self.research_note = None;
+                }
+            });
+            if searching {
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    listening(ui);
+                    ui.label("Searching…");
+                });
+            }
+            if let Some(note) = &self.research_note {
+                ui.add_space(8.0);
+                ui.colored_label(ERROR, note);
+            }
+            if let Some(found) = &self.research {
+                ui.add_space(12.0);
+                let saved = if found.sources.is_empty() {
+                    "Nothing found for this song. Try the artist and song name spelled out in full."
+                        .to_string()
+                } else {
+                    format!(
+                        "{} sources for {}. Saved, so they open offline next time.",
+                        found.sources.len(),
+                        found.song
+                    )
+                };
+                ui.label(RichText::new(saved).size(13.0).weak());
+                for source in &found.sources {
+                    ui.add_space(10.0);
+                    let domain = source
+                        .url
+                        .split('/')
+                        .nth(2)
+                        .unwrap_or_default()
+                        .trim_start_matches("www.");
+                    ui.hyperlink_to(semibold(&source.title, 15.0).color(INK), &source.url);
+                    ui.label(RichText::new(domain).size(12.0).weak());
+                    ui.label(RichText::new(snippet(&source.snippet)).size(13.0));
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new("Next: a local AI reads these pages and pulls out the gear and any published settings.")
+                        .size(12.0)
+                        .weak(),
+                );
+            }
+        });
     }
 
     fn rig_view(&mut self, ui: &mut egui::Ui) {
@@ -402,7 +514,91 @@ impl App {
             ui.add_space(10.0);
             ui.colored_label(ERROR, e);
         }
+
+        ui.add_space(24.0);
+        card(ui, |ui| {
+            ui.label(semibold("Song research", 17.0));
+            ui.label(
+                RichText::new("GigEyes searches the web with your own Tavily key. The free plan has 1,000 searches a month and needs no card.")
+                    .size(13.0)
+                    .weak(),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let field = egui::TextEdit::singleline(&mut self.tavily_key)
+                    .hint_text("tvly-…")
+                    .password(true)
+                    .margin(Vec2::new(10.0, 7.0))
+                    .desired_width(320.0);
+                ui.add(field);
+                if ui.button("Save key").clicked() {
+                    self.key_note = Some(match research::save_key(&self.tavily_key) {
+                        Ok(()) if self.tavily_key.trim().is_empty() => "Key removed.".into(),
+                        Ok(()) => "Saved.".into(),
+                        Err(e) => e,
+                    });
+                }
+                ui.hyperlink_to("Get a free key", research::KEY_PAGE);
+            });
+            if let Some(note) = &self.key_note {
+                ui.label(RichText::new(note).size(13.0).weak());
+            }
+        });
+
+        ui.add_space(14.0);
+        let (hw, choice) = self.hardware.get_or_insert_with(|| {
+            let hw = hardware::detect();
+            let choice = hardware::choose(&hw);
+            (hw, choice)
+        });
+        card(ui, |ui| {
+            ui.label(semibold("Local AI", 17.0));
+            let gpu = match &hw.gpu {
+                Some(g) => format!("{} with {:.0} GB of video memory", g.name, g.vram_gb),
+                None => "no separate graphics card".into(),
+            };
+            ui.label(
+                RichText::new(format!(
+                    "This PC: {gpu}, and {:.0} GB of memory.",
+                    hw.ram_gb
+                ))
+                .size(13.0)
+                .weak(),
+            );
+            ui.add_space(10.0);
+            match &choice.model {
+                Some(model) => {
+                    ui.label(semibold(
+                        format!("{}  ·  {:.1} GB download", model.name, model.size_gb),
+                        15.0,
+                    ));
+                }
+                None => {
+                    ui.label(semibold("No local AI on this PC", 15.0));
+                }
+            }
+            ui.label(RichText::new(&choice.reason).size(13.0));
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new("GigEyes picks the biggest model that leaves room for Gig Performer. It downloads when AI reading arrives in a later update.")
+                    .size(12.0)
+                    .weak(),
+            );
+        });
     }
+}
+
+/// Search excerpts can run long; keep a readable two or three lines.
+fn snippet(text: &str) -> String {
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= 260 {
+        return flat;
+    }
+    let cut: String = flat.chars().take(260).collect();
+    format!(
+        "{}…",
+        cut.rsplit_once(' ').map_or(cut.as_str(), |(head, _)| head)
+    )
 }
 
 impl eframe::App for App {
@@ -413,11 +609,28 @@ impl eframe::App for App {
             && let Ok(result) = rx.try_recv()
         {
             self.state = match result {
-                Ok((name, tone)) => State::Done(name, tone),
+                Ok((name, tone)) => {
+                    self.song = research::song_from_title(&name);
+                    self.research = research::cached(&self.song);
+                    self.research_note = None;
+                    State::Done(name, tone)
+                }
                 Err(e) => State::Failed(e),
             };
             self.result = None;
             self.revealed_at = now;
+        }
+        if let Some(rx) = &self.research_job
+            && let Ok(found) = rx.try_recv()
+        {
+            match found {
+                Ok(found) => {
+                    self.research_note = research::save(&found).err();
+                    self.research = Some(found);
+                }
+                Err(e) => self.research_note = Some(e),
+            }
+            self.research_job = None;
         }
         if let Some(path) =
             ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()))
