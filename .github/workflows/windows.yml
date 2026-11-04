@@ -3,8 +3,10 @@ name: Windows build
 on:
   push:
   workflow_dispatch:
-  release:
-    types: [published]
+    inputs:
+      release:
+        description: "Publish a pre-release with this tag, e.g. v0.1.0-prealpha.1 (leave empty to just build)"
+        default: ""
 
 permissions:
   contents: write
@@ -24,8 +26,12 @@ jobs:
           path: |
             target/release/gigeyes.exe
             target/release/gp-probe.exe
-      # Publishing a release on GitHub attaches the exes to it.
-      - if: github.event_name == 'release'
-        run: gh release upload "${{ github.event.release.tag_name }}" target/release/gigeyes.exe target/release/gp-probe.exe --clobber
+      # Run this workflow by hand with a tag to publish the exes as a pre-release.
+      - if: inputs.release != ''
+        run: >-
+          gh release create "$env:TAG" target/release/gigeyes.exe target/release/gp-probe.exe
+          --target "${{ github.sha }}" --prerelease --title "GigEyes $env:TAG (pre-alpha)"
+          --notes-file .github/release-notes.md
         env:
+          TAG: ${{ inputs.release }}
           GH_TOKEN: ${{ github.token }}
