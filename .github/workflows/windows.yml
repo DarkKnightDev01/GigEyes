@@ -30,19 +30,47 @@ jobs:
           $want = ($line -split ' ')[0]
           $got = (Get-FileHash target/release/yt-dlp.exe -Algorithm SHA256).Hash.ToLower()
           if (-not $want -or $got -ne $want) { throw "yt-dlp.exe checksum mismatch: got $got, expected $want" }
+      # One file: the setup program with the app and yt-dlp appended (see gigeyes-setup/src/payload.rs).
+      # Setup is a windowed program, so Start-Process -Wait is how PowerShell waits for it and reads its exit code.
+      - name: Pack the installer
+        run: |
+          $p = Start-Process target/release/gigeyes-setup.exe -Wait -PassThru -ArgumentList `
+            '--pack', 'target/release/GigEyes-Setup.exe', 'target/release/gigeyes.exe', 'target/release/yt-dlp.exe'
+          if ($p.ExitCode -ne 0) { throw "packing the installer failed" }
+      - name: Install and uninstall on this Windows machine
+        run: |
+          $dir = "$env:RUNNER_TEMP\InstallTest"
+          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes"
+          $link = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\GigEyes.lnk"
+          $p = Start-Process target/release/GigEyes-Setup.exe -Wait -PassThru -ArgumentList '--silent', '--dir', $dir
+          if ($p.ExitCode -ne 0) { throw "install failed" }
+          foreach ($f in 'gigeyes.exe', 'yt-dlp.exe', 'uninstall.exe') {
+            if (-not (Test-Path "$dir\GigEyes\$f")) { throw "install is missing $f" }
+          }
+          if (-not (Test-Path $key)) { throw "not listed in Installed apps" }
+          if (-not (Test-Path $link)) { throw "no Start menu shortcut" }
+          (Get-ItemProperty $key) | Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString | Format-List
+          $u = Start-Process "$dir\GigEyes\uninstall.exe" -Wait -PassThru -ArgumentList '--uninstall', '--silent'
+          if ($u.ExitCode -ne 0) { throw "uninstall failed" }
+          Start-Sleep -Seconds 6  # the uninstaller removes itself a moment after it exits
+          if (Test-Path "$dir\GigEyes") { throw "install folder left behind: $(Get-ChildItem "$dir\GigEyes" -Name)" }
+          if (Test-Path $key) { throw "still listed in Installed apps" }
+          if (Test-Path $link) { throw "Start menu shortcut left behind" }
+          "Install and uninstall both clean."
       - uses: actions/upload-artifact@v6
         with:
           name: gigeyes-windows
-          path: target/release/*.exe
+          path: |
+            target/release/GigEyes-Setup.exe
+            target/release/gigeyes.exe
       # Publish a pre-release: run this workflow by hand with a tag, or push to main with a
       # commit message starting "release: v0.1.0-prealpha.1".
       - if: inputs.release != '' || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release:'))
         run: |
           $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { ($env:MSG -split "`n")[0].Substring(8).Trim() }
-          # One zip so users download a single file, however many exes there are.
-          $zip = "GigEyes-$tag-windows.zip"
-          Compress-Archive -Path target/release/*.exe, README.md -DestinationPath $zip
-          gh release create $tag $zip `
+          $setup = "GigEyes-Setup-$tag.exe"
+          Copy-Item target/release/GigEyes-Setup.exe $setup
+          gh release create $tag $setup `
             --target $env:GITHUB_SHA --prerelease --title "GigEyes $tag (pre-alpha)" `
             --notes-file .github/release-notes.md
         env:
