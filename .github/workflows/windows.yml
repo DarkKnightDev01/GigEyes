@@ -34,16 +34,19 @@ jobs:
       # Setup is a windowed program, so Start-Process -Wait is how PowerShell waits for it and reads its exit code.
       - name: Pack the installer
         run: |
+          # Into its own folder: Windows file names ignore case, so target/release/GigEyes-Setup.exe
+          # would be the running gigeyes-setup.exe itself.
+          New-Item -ItemType Directory -Force dist | Out-Null
           $p = Start-Process target/release/gigeyes-setup.exe -Wait -PassThru -RedirectStandardError pack-errors.txt -ArgumentList `
-            '--pack', 'target/release/GigEyes-Setup.exe', 'target/release/gigeyes.exe', 'target/release/yt-dlp.exe'
+            '--pack', 'dist/GigEyes-Setup.exe', 'target/release/gigeyes.exe', 'target/release/yt-dlp.exe'
           if ($p.ExitCode -ne 0) { Get-Content pack-errors.txt; throw "packing the installer failed ($($p.ExitCode))" }
-          Get-Item target/release/GigEyes-Setup.exe | Select-Object Name, Length
+          Get-Item dist/GigEyes-Setup.exe | Select-Object Name, Length
       - name: Install and uninstall on this Windows machine
         run: |
           $dir = "$env:RUNNER_TEMP\InstallTest"
           $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes"
           $link = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\GigEyes.lnk"
-          $p = Start-Process target/release/GigEyes-Setup.exe -Wait -PassThru -RedirectStandardError install-errors.txt -ArgumentList '--silent', '--dir', $dir
+          $p = Start-Process dist/GigEyes-Setup.exe -Wait -PassThru -RedirectStandardError install-errors.txt -ArgumentList '--silent', '--dir', $dir
           if ($p.ExitCode -ne 0) { Get-Content install-errors.txt; throw "install failed" }
           foreach ($f in 'gigeyes.exe', 'yt-dlp.exe', 'uninstall.exe') {
             if (-not (Test-Path "$dir\GigEyes\$f")) { throw "install is missing $f" }
@@ -62,7 +65,7 @@ jobs:
         with:
           name: gigeyes-windows
           path: |
-            target/release/GigEyes-Setup.exe
+            dist/GigEyes-Setup.exe
             target/release/gigeyes.exe
       # Publish a pre-release: run this workflow by hand with a tag, or push to main with a
       # commit message starting "release: v0.1.0-prealpha.1".
@@ -70,7 +73,7 @@ jobs:
         run: |
           $tag = if ($env:INPUT_TAG) { $env:INPUT_TAG } else { ($env:MSG -split "`n")[0].Substring(8).Trim() }
           $setup = "GigEyes-Setup-$tag.exe"
-          Copy-Item target/release/GigEyes-Setup.exe $setup
+          Copy-Item dist/GigEyes-Setup.exe $setup
           gh release create $tag $setup `
             --target $env:GITHUB_SHA --prerelease --title "GigEyes $tag (pre-alpha)" `
             --notes-file .github/release-notes.md
