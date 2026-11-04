@@ -14,7 +14,9 @@ Early work in progress. The plan, in order:
 
 ## Download
 
-Every push builds Windows `.exe` files. On GitHub go to **Actions → Windows build → latest run → Artifacts → gigeyes-windows**.
+Grab `gp-probe.exe` and `gigeyes.exe` from the newest pre-release on the [Releases page](https://github.com/DarkKnightDev01/GigEyes/releases). These are pre-alpha: expect rough edges.
+
+Builds of every push, between releases, are under **Actions → Windows build → a run → Artifacts**.
 
 ## Testing the Gig Performer link with gp-probe
 

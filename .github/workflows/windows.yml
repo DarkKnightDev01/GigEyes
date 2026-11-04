@@ -3,6 +3,11 @@ name: Windows build
 on:
   push:
   workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -19,3 +24,8 @@ jobs:
           path: |
             target/release/gigeyes.exe
             target/release/gp-probe.exe
+      # Publishing a release on GitHub attaches the exes to it.
+      - if: github.event_name == 'release'
+        run: gh release upload "${{ github.event.release.tag_name }}" target/release/gigeyes.exe target/release/gp-probe.exe --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
