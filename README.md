@@ -6,7 +6,7 @@ GigEyes listens to the song, works out the tone, and tells you which of your plu
 
 Pre-alpha. What works today:
 
-- **Tone analysis:** drop in a song or an isolated guitar track and get its EQ curve, brightness, mid scoop, low end and how compressed it sounds.
+- **Tone analysis:** drop in a song, an isolated guitar track or a video link. GigEyes sums the tone up in one line, shows where an amp's Gain, Bass, Middle, Treble and Presence knobs would sit, and draws the EQ curve.
 
 Coming next, in order:
 
@@ -45,3 +45,9 @@ Or paste a link (YouTube and [most other video sites](https://github.com/yt-dlp/
 cargo test --workspace
 cargo build --release
 ```
+
+## Credits
+
+- [Barlow](https://github.com/jpt/barlow) typeface, SIL Open Font License (`gigeyes/fonts/OFL.txt`)
+- [Lucide](https://lucide.dev) icons, ISC License
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp), Unlicense, shipped in the release zip

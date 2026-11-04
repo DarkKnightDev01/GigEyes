@@ -17,23 +17,20 @@ pub struct Tone {
     /// Peak-to-average ratio. Low = squashed (high gain or heavy compression), high = dynamic.
     pub crest_db: f32,
     pub seconds: f32,
-    /// Gain, Brightness, Mids, Low end: in that order.
-    pub summary: Vec<Reading>,
+    /// One sentence in player's words, e.g. "High-gain, with scooped mids, a bright top and a big low end."
+    pub verdict: String,
+    /// Gain, Bass, Middle, Treble, Presence: where an amp's knobs would sit, 0 to 10.
+    pub knobs: Vec<Knob>,
 }
 
-/// One plain-language reading, e.g. label "Mids", verdict "Scooped", detail "800 Hz–2 kHz sits 5 dB below…".
-pub struct Reading {
+pub struct Knob {
     pub label: &'static str,
+    /// 0 to 10, 5 is noon.
+    pub value: f32,
+    /// One or two words, e.g. "Scooped".
     pub verdict: &'static str,
+    /// The measurement behind it, shown on hover.
     pub detail: String,
-}
-
-fn reading(label: &'static str, verdict: &'static str, detail: impl Into<String>) -> Reading {
-    Reading {
-        label,
-        verdict,
-        detail: detail.into(),
-    }
 }
 
 /// Samples per loudness block for the peak-to-average measure.
@@ -180,57 +177,92 @@ fn describe(power: Vec<f32>, crest_db: f32, seconds: f32, rate: u32) -> Tone {
             v.iter().sum::<f32>() / v.len() as f32
         }
     };
-    let (lows, low_mids, mids, highs) = (
+    let (lows, low_mids, mids, highs, air) = (
         region(80.0, 250.0),
         region(250.0, 800.0),
         region(800.0, 2000.0),
         region(2000.0, 5000.0),
+        region(5000.0, 12_000.0),
     );
 
-    // shortcut: thresholds are rough guesses for guitar, tune them against real reference tracks.
-    let gain = match crest_db {
-        c if c < 6.0 => reading(
-            "Gain",
-            "High gain",
-            "Squashed and saturated, or heavily compressed.",
+    // shortcut: thresholds and knob mappings are rough guesses for guitar, tune them on real tracks.
+    let knob_at = |value: f32| value.clamp(0.0, 10.0);
+    let gain = Knob {
+        label: "Gain",
+        value: knob_at((16.0 - crest_db) / 12.0 * 10.0),
+        verdict: match crest_db {
+            c if c < 6.0 => "High gain",
+            c if c < 10.0 => "Crunch",
+            _ => "Clean",
+        },
+        detail: format!(
+            "Peaks sit {crest_db:.1} dB over the average level. Lower means more squashed."
         ),
-        c if c < 10.0 => reading(
-            "Gain",
-            "Crunch",
-            "Some drive or compression, not fully clean.",
-        ),
-        _ => reading("Gain", "Clean", "Dynamic: clean or lightly driven."),
     };
-    let slope_text = format!("Falls {:.1} dB per octave.", -tilt_db_per_octave);
-    let brightness = match tilt_db_per_octave {
-        t if t > -3.0 => reading("Brightness", "Bright", slope_text),
-        t if t < -7.0 => reading("Brightness", "Dark", slope_text),
-        _ => reading("Brightness", "Balanced", slope_text),
+    let low_end = lows - low_mids;
+    let bass = Knob {
+        label: "Bass",
+        value: knob_at(5.0 + low_end / 2.0),
+        verdict: if low_end > 2.0 {
+            "Big"
+        } else if low_end < -6.0 {
+            "Tight"
+        } else {
+            "Moderate"
+        },
+        detail: format!("80–250 Hz sits {} 250–800 Hz.", relative(low_end)),
     };
     let scoop = mids - (low_mids + highs) / 2.0;
-    let mid_reading = if scoop < -4.0 {
-        reading(
-            "Mids",
-            "Scooped",
-            format!("800 Hz–2 kHz sits {:.0} dB below its neighbours.", -scoop),
-        )
-    } else if scoop > 3.0 {
-        reading(
-            "Mids",
-            "Pushed",
-            format!("800 Hz–2 kHz sits {scoop:.0} dB above its neighbours."),
-        )
-    } else {
-        reading("Mids", "Even", "Neither scooped nor pushed.")
+    let middle = Knob {
+        label: "Middle",
+        value: knob_at(5.0 + scoop / 1.5),
+        verdict: if scoop < -4.0 {
+            "Scooped"
+        } else if scoop > 3.0 {
+            "Pushed"
+        } else {
+            "Even"
+        },
+        detail: format!("800 Hz–2 kHz sits {} its neighbours.", relative(scoop)),
     };
-    let low_end = if lows - low_mids > 2.0 {
-        reading("Low end", "Big", "Lots of weight below 250 Hz.")
-    } else if lows - low_mids < -6.0 {
-        reading("Low end", "Tight", "Little below 250 Hz.")
-    } else {
-        reading("Low end", "Moderate", "Some weight below 250 Hz.")
+    let treble = Knob {
+        label: "Treble",
+        value: knob_at(5.0 + (tilt_db_per_octave + 5.0)),
+        verdict: match tilt_db_per_octave {
+            t if t > -3.0 => "Bright",
+            t if t < -7.0 => "Dark",
+            _ => "Balanced",
+        },
+        detail: format!(
+            "The level falls {:.1} dB per octave from lows to highs.",
+            -tilt_db_per_octave
+        ),
     };
-    let summary = vec![gain, brightness, mid_reading, low_end];
+    let sheen = air - highs;
+    let presence = Knob {
+        label: "Presence",
+        value: knob_at(5.0 + (sheen + 6.0) / 2.0),
+        verdict: if sheen > -3.0 {
+            "Airy"
+        } else if sheen < -10.0 {
+            "Rolled off"
+        } else {
+            "Smooth"
+        },
+        detail: format!("5–12 kHz sits {} 2–5 kHz.", relative(sheen)),
+    };
+
+    let verdict = format!(
+        "{}, with {} mids, a {} top and a {} low end.",
+        match gain.verdict {
+            "High gain" => "High-gain",
+            "Crunch" => "Crunchy",
+            _ => "Clean",
+        },
+        middle.verdict.to_lowercase(),
+        treble.verdict.to_lowercase(),
+        bass.verdict.to_lowercase(),
+    );
 
     Tone {
         centers,
@@ -238,7 +270,17 @@ fn describe(power: Vec<f32>, crest_db: f32, seconds: f32, rate: u32) -> Tone {
         tilt_db_per_octave,
         crest_db,
         seconds,
-        summary,
+        verdict,
+        knobs: vec![gain, bass, middle, treble, presence],
+    }
+}
+
+/// "5 dB below" / "3 dB above" / "level with", for knob details.
+fn relative(db: f32) -> String {
+    match db.round() {
+        d if d < 0.0 => format!("{:.0} dB below", -d),
+        d if d > 0.0 => format!("{d:.0} dB above"),
+        _ => "level with".into(),
     }
 }
 
@@ -338,7 +380,8 @@ mod tests {
             white.tilt_db_per_octave
         );
         assert!(dark.tilt_db_per_octave < white.tilt_db_per_octave - 3.0);
-        assert_eq!(dark.summary[1].verdict, "Dark");
+        assert_eq!(dark.knobs[3].verdict, "Dark");
+        assert!(dark.knobs[3].value < white.knobs[3].value);
     }
 
     #[test]
@@ -347,7 +390,13 @@ mod tests {
         let driven = analyze(&plucks(40.0), RATE);
         assert!(clean.crest_db > 10.0, "clean crest {}", clean.crest_db);
         assert!(driven.crest_db < 6.0, "driven crest {}", driven.crest_db);
-        assert_eq!(driven.summary[0].verdict, "High gain");
+        assert_eq!(driven.knobs[0].verdict, "High gain");
+        assert!(
+            driven.verdict.starts_with("High-gain, with"),
+            "{}",
+            driven.verdict
+        );
+        assert!(driven.knobs.iter().all(|k| (0.0..=10.0).contains(&k.value)));
     }
 
     #[test]
