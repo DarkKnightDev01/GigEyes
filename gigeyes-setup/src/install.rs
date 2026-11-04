@@ -179,8 +179,10 @@ mod system {
             uninstaller.display(),
             dir.display()
         );
+        // raw_arg: cmd has its own quoting rules, so the line goes over exactly as written.
+        // /S /C "…" strips only the outer quotes and keeps the ones around each path.
         let _ = std::process::Command::new("cmd")
-            .args(["/C", &script])
+            .raw_arg(format!("/S /C \"{script}\""))
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
     }
@@ -248,7 +250,15 @@ mod tests {
 
         std::fs::write(dir.join("my-notes.txt"), b"mine").unwrap();
         uninstall(&dir, false).unwrap();
-        assert!(!dir.join("gigeyes.exe").exists() && !dir.join(UNINSTALLER).exists());
+        assert!(!dir.join("gigeyes.exe").exists());
+        // On Windows the uninstaller deletes itself a moment after it finishes.
+        for _ in 0..50 {
+            if !dir.join(UNINSTALLER).exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert!(!dir.join(UNINSTALLER).exists(), "the uninstaller removed itself");
         assert!(
             dir.join("my-notes.txt").exists(),
             "a file GigEyes didn't put there survives"
