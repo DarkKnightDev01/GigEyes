@@ -8,11 +8,13 @@ Pre-alpha. What works today:
 
 - **Tone analysis:** drop in a song, an isolated guitar track or a video link. GigEyes sums the tone up in one line, shows where an amp's Gain, Bass, Middle, Treble and Presence knobs would sit, and draws the EQ curve.
 
+- **Your rig:** GigEyes finds the VST3 plugins on your PC (it reads their names from disk and never loads them) and you tick the ones you play through.
+
 Coming next, in order:
 
-1. Plugin scanner: GigEyes reads the knobs of your VST3 plugins
-2. Your rig: tell GigEyes what each plugin covers (drive, amp, cab, EQ, delay, reverb…); all-in-one plugins like Helix Native just cover several
-3. Recommendations: which plugin for each stage and where to set each knob
+1. Plugin knowledge: what real amps and pedals each popular plugin models, taken from the makers' own documentation
+2. Song research: with your own free search key, GigEyes finds sources on the gear used on a song; a local AI on your GPU pulls out the gear and any published settings, each with a quote and a link, cached for offline use
+3. Recommendations: which of your plugins for each stage and where to set each knob, saying which numbers come from a source and which from the audio
 4. Automatic tuning: GigEyes runs a dry recording of your guitar through your plugins, tunes the knobs and saves standard `.vstpreset` files any host can load. Hand-dialled settings stay as the fallback for plugins that won't load outside a host
 5. Tone Library, fully offline
 6. Local AI that picks the chain and explains the result

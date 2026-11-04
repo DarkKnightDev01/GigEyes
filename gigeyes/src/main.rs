@@ -4,6 +4,7 @@
 mod analysis;
 mod decode;
 mod fetch;
+mod rig;
 
 use analysis::{Knob, Tone};
 use eframe::egui::{
@@ -55,7 +56,10 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_fonts(fonts());
             cc.egui_ctx.set_theme(egui::Theme::Dark);
             cc.egui_ctx.style_mut_of(egui::Theme::Dark, theme);
-            let mut app = App::default();
+            let mut app = App {
+                rig: rig::load(),
+                ..App::default()
+            };
             if let Some(path) = initial {
                 app.open(path, &cc.egui_ctx);
             }
@@ -103,8 +107,9 @@ fn theme(style: &mut egui::Style) {
     v.weak_text_color = Some(MUTED);
     v.error_fg_color = ERROR;
     v.hyperlink_color = ACCENT;
-    v.selection.bg_fill = ACCENT.gamma_multiply(0.35);
-    v.selection.stroke = Stroke::new(1.0, ACCENT);
+    // Neutral selection (tabs, highlighted text): the accent stays on data and the main action.
+    v.selection.bg_fill = Color32::from_rgb(0x3a, 0x36, 0x30);
+    v.selection.stroke = Stroke::new(1.0, INK);
     v.widgets.noninteractive.bg_stroke.color = LINE;
     for (w, fill) in [
         (&mut v.widgets.inactive, RAISED),
@@ -157,6 +162,18 @@ struct App {
     link: String,
     /// When the current result arrived, so the knobs can turn into place.
     revealed_at: f64,
+    screen: Screen,
+    /// None until the first scan: then the tone screen asks for it.
+    rig: Option<Vec<rig::Plugin>>,
+    rig_filter: String,
+    rig_error: Option<String>,
+}
+
+#[derive(Default, PartialEq, Clone, Copy)]
+enum Screen {
+    #[default]
+    Tone,
+    Rig,
 }
 
 fn file_name(path: &std::path::Path) -> String {
@@ -221,6 +238,171 @@ impl App {
             },
         );
     }
+
+    fn tone_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, hovering: bool, reveal: f32) {
+        let busy = matches!(self.state, State::Reading(_));
+        let has_result = matches!(self.state, State::Done(..));
+        // Before the first result the drop zone leads; afterwards the result does and inputs shrink to a row.
+        if !has_result && drop_zone(ui, hovering) {
+            self.pick_file(ctx);
+        }
+        ui.add_space(12.0);
+        let (pick, load) = input_row(ui, &mut self.link, has_result, busy);
+        if pick {
+            self.pick_file(ctx);
+        }
+        if load {
+            self.open_link(ctx);
+        }
+        if !has_result {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("Works best on an isolated guitar track. On a full mix, bass, drums and vocals colour the result.")
+                    .size(13.0)
+                    .weak(),
+            );
+        }
+        if self.rig.is_none() {
+            ui.add_space(20.0);
+            card(ui, |ui| {
+                ui.label(semibold("Tell GigEyes what you play through", 17.0));
+                ui.label(
+                    RichText::new("Pick your plugins once, and GigEyes suggests settings for your own rig instead of a generic amp.")
+                        .size(13.0)
+                        .weak(),
+                );
+                ui.add_space(10.0);
+                if ui.button("Set up your rig").clicked() {
+                    self.screen = Screen::Rig;
+                }
+            });
+        }
+        ui.add_space(28.0);
+
+        match &self.state {
+            State::Empty => amp_panel(ui, &waiting_knobs(), 1.0, false),
+            State::Reading(label) => {
+                card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        listening(ui);
+                        ui.add_space(6.0);
+                        ui.label(label);
+                    });
+                });
+                // Same panel stays put, so the knobs turn in place when the result lands.
+                ui.add_space(14.0);
+                amp_panel(ui, &waiting_knobs(), 1.0, false);
+            }
+            State::Failed(e) => card(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.add(icon(ICON_ALERT, 20.0, ERROR));
+                    ui.label(e);
+                });
+                ui.label(RichText::new("Try another file or link.").weak());
+            }),
+            State::Done(name, tone) => report(ui, name, tone, ease(reveal)),
+        }
+    }
+
+    fn rig_view(&mut self, ui: &mut egui::Ui) {
+        ui.label(semibold("Your rig", 22.0));
+        ui.label(
+            RichText::new("Tick the plugins you play through. GigEyes reads their names from disk; it never loads or changes them.")
+                .weak(),
+        );
+        ui.add_space(16.0);
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            let scan =
+                egui::Button::new(semibold("Scan for plugins", 15.0).color(GROUND)).fill(ACCENT);
+            if ui.add(scan).clicked() {
+                let previous = self.rig.clone().unwrap_or_default();
+                self.rig = Some(rig::rescan(&previous, &rig::default_folders()));
+                changed = true;
+            }
+            if ui.button("Add a folder…").clicked()
+                && let Some(folder) = rfd::FileDialog::new().pick_folder()
+            {
+                let mut plugins = self.rig.clone().unwrap_or_default();
+                let new: Vec<_> = rig::scan(&[folder])
+                    .into_iter()
+                    .filter(|p| !plugins.iter().any(|o| o.path == p.path))
+                    .collect();
+                plugins.extend(new);
+                plugins.sort_by_key(|p| p.name.to_lowercase());
+                self.rig = Some(plugins);
+                changed = true;
+            }
+            if let Some(plugins) = &self.rig {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let ticked = plugins.iter().filter(|p| p.owned).count();
+                    ui.label(RichText::new(format!("{ticked} of {} ticked", plugins.len())).weak());
+                });
+            }
+        });
+        ui.add_space(16.0);
+
+        match &mut self.rig {
+            None => {
+                let folders: Vec<String> = rig::default_folders()
+                    .iter()
+                    .map(|f| f.display().to_string())
+                    .collect();
+                ui.label(
+                    RichText::new(format!(
+                        "Not scanned yet. GigEyes looks in {}.",
+                        folders.join(" and ")
+                    ))
+                    .weak(),
+                );
+            }
+            Some(plugins) if plugins.is_empty() => {
+                ui.label(
+                    "No VST3 plugins found there. If yours live somewhere else, add that folder.",
+                );
+            }
+            Some(plugins) => {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.rig_filter)
+                        .hint_text("Filter by name or maker")
+                        .margin(Vec2::new(10.0, 7.0))
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(10.0);
+                let filter = self.rig_filter.to_lowercase();
+                card(ui, |ui| {
+                    for plugin in plugins.iter_mut().filter(|p| {
+                        filter.is_empty()
+                            || p.name.to_lowercase().contains(&filter)
+                            || p.vendor.to_lowercase().contains(&filter)
+                    }) {
+                        ui.horizontal(|ui| {
+                            changed |= ui.checkbox(&mut plugin.owned, "").changed();
+                            ui.vertical(|ui| {
+                                ui.label(semibold(&plugin.name, 15.0));
+                                let about: Vec<&str> =
+                                    [plugin.vendor.as_str(), plugin.kind.as_str()]
+                                        .into_iter()
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                if !about.is_empty() {
+                                    ui.label(RichText::new(about.join(" · ")).size(13.0).weak());
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                    }
+                });
+            }
+        }
+        if changed && let Some(plugins) = &self.rig {
+            self.rig_error = rig::save(plugins).err();
+        }
+        if let Some(e) = &self.rig_error {
+            ui.add_space(10.0);
+            ui.colored_label(ERROR, e);
+        }
+    }
 }
 
 impl eframe::App for App {
@@ -243,65 +425,25 @@ impl eframe::App for App {
             self.open(path, &ctx);
         }
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
-        let busy = matches!(self.state, State::Reading(_));
         let has_result = matches!(self.state, State::Done(..));
         let reveal = ((now - self.revealed_at) / REVEAL_SECS).clamp(0.0, 1.0) as f32;
         if has_result && reveal < 1.0 {
             ctx.request_repaint();
         }
 
-        egui::CentralPanel::default().frame(egui::Frame::central_panel(ui.style()).inner_margin(32.0)).show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                header(ui);
-                ui.add_space(24.0);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(32.0))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    header(ui, &mut self.screen);
+                    ui.add_space(24.0);
 
-                // Before the first result the drop zone leads; afterwards the result does and inputs shrink to a row.
-                if !has_result && drop_zone(ui, hovering) {
-                    self.pick_file(&ctx);
-                }
-                ui.add_space(12.0);
-                let (pick, load) = input_row(ui, &mut self.link, has_result, busy);
-                if pick {
-                    self.pick_file(&ctx);
-                }
-                if load {
-                    self.open_link(&ctx);
-                }
-                if !has_result {
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new("Works best on an isolated guitar track. On a full mix, bass, drums and vocals colour the result.")
-                            .size(13.0)
-                            .weak(),
-                    );
-                }
-                ui.add_space(28.0);
-
-                match &self.state {
-                    State::Empty => amp_panel(ui, &waiting_knobs(), 1.0, false),
-                    State::Reading(label) => {
-                        card(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                listening(ui);
-                                ui.add_space(6.0);
-                                ui.label(label);
-                            });
-                        });
-                        // Same panel stays put, so the knobs turn in place when the result lands.
-                        ui.add_space(14.0);
-                        amp_panel(ui, &waiting_knobs(), 1.0, false);
+                    match self.screen {
+                        Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
+                        Screen::Rig => self.rig_view(ui),
                     }
-                    State::Failed(e) => card(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.add(icon(ICON_ALERT, 20.0, ERROR));
-                            ui.label(e);
-                        });
-                        ui.label(RichText::new("Try another file or link.").weak());
-                    }),
-                    State::Done(name, tone) => report(ui, name, tone, ease(reveal)),
-                }
+                });
             });
-        });
 
         if hovering {
             drop_overlay(&ctx);
@@ -345,13 +487,20 @@ fn mark(ui: &mut egui::Ui, size: f32) {
     }
 }
 
-fn header(ui: &mut egui::Ui) {
+fn header(ui: &mut egui::Ui, screen: &mut Screen) {
     ui.horizontal(|ui| {
         mark(ui, 40.0);
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.label(semibold("GigEyes", 24.0));
             ui.label(RichText::new("Hear a tone. See where the knobs sit.").weak());
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            for (target, label) in [(Screen::Rig, "Your rig"), (Screen::Tone, "Tone")] {
+                if ui.selectable_label(*screen == target, label).clicked() {
+                    *screen = target;
+                }
+            }
         });
     });
 }
