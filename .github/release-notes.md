@@ -1,12 +1,11 @@
 Pre-alpha build. Expect rough edges.
 
-Download the `.zip` below, right-click it → **Extract All**, and follow the [README](https://github.com/DarkKnightDev01/GigEyes#readme) (also inside the zip).
+Download the `.zip` below, right-click it → **Extract All**, and run `gigeyes.exe`. Setup and usage are in the [README](https://github.com/DarkKnightDev01/GigEyes#readme), which is also inside the zip.
 
-**What's in it**
-- `gp-probe.exe`: checks that Gig Performer 5 Pro answers OSC. Start here: see "Test the Gig Performer link" in the README.
-- `gigeyes.exe`: the app. Just an empty window for now.
+**What it does now**
+Drop in a song or an isolated guitar track and GigEyes shows its tone: EQ curve, brightness, mid scoop, low end and how compressed it sounds.
 
-**Known issue**
-If Gig Performer says "OSC Listening Failure: port number 54344", another program holds that port. Set Gig Performer's listening port to `7344` in Options → OSC Setup and run `gp-probe.exe --gp-port 7344 check <plugin> <widget>`.
-
-Windows may warn that the files are from an unknown publisher, because they aren't code-signed yet. Click "More info" → "Run anyway".
+**Known limits**
+- webm and opus files don't open yet.
+- The "how compressed" reading is a rough guess.
+- Windows may warn that the app is from an unknown publisher, because it isn't code-signed yet. Click "More info" → "Run anyway".

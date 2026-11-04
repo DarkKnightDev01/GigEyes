@@ -1,3 +1,3 @@
 [workspace]
-members = ["gigeyes", "gp-probe"]
+members = ["gigeyes"]
 resolver = "2"

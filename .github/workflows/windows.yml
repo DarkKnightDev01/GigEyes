@@ -23,9 +23,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: gigeyes-windows
-          path: |
-            target/release/gigeyes.exe
-            target/release/gp-probe.exe
+          path: target/release/*.exe
       # Publish a pre-release: run this workflow by hand with a tag, or push to main with a
       # commit message starting "release: v0.1.0-prealpha.1".
       - if: inputs.release != '' || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release:'))
