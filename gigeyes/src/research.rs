@@ -61,15 +61,17 @@ pub fn song_from_title(title: &str) -> String {
         "explicit",
     ];
     for (open, close) in [('(', ')'), ('[', ']')] {
-        while let Some(start) = s.find(open) {
+        let mut from = 0;
+        while let Some(start) = s[from..].find(open).map(|i| i + from) {
             let Some(len) = s[start..].find(close) else {
                 break;
             };
             let inner = s[start + 1..start + len].to_lowercase();
-            if !noise.iter().any(|n| inner.contains(n)) {
-                break;
+            if noise.iter().any(|n| inner.contains(n)) {
+                s.replace_range(start..=start + len, "");
+            } else {
+                from = start + len; // keep it and look further along
             }
-            s.replace_range(start..=start + len, "");
         }
     }
     s.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -127,6 +129,8 @@ fn search_at(base: &str, key: &str, song: &str) -> Result<Research, String> {
     let sources = parsed
         .results
         .into_iter()
+        // Only web pages: a link GigEyes shows must never open a local file or another program.
+        .filter(|r| r.url.starts_with("https://") || r.url.starts_with("http://"))
         .map(|r| Source {
             title: r.title,
             url: r.url,
@@ -175,7 +179,19 @@ fn cache_name(song: &str) -> String {
 
 pub fn cached(song: &str) -> Option<Research> {
     let file = data_dir()?.join("research").join(cache_name(song));
-    serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()
+    let found: Research = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+    // Two long titles can share a cache file name; only return research for this exact song.
+    found
+        .song
+        .eq_ignore_ascii_case(song.trim())
+        .then_some(found)
+}
+
+/// Write a file whole or not at all: a crash mid-write leaves the old file, never half a new one.
+pub fn write_atomic(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    let fresh = path.with_extension("tmp");
+    std::fs::write(&fresh, contents)?;
+    std::fs::rename(&fresh, path)
 }
 
 pub fn save(research: &Research) -> Result<(), String> {
@@ -184,9 +200,9 @@ pub fn save(research: &Research) -> Result<(), String> {
         .join("research");
     std::fs::create_dir_all(&dir)
         .and_then(|_| {
-            std::fs::write(
-                dir.join(cache_name(&research.song)),
-                serde_json::to_string(research).expect("serialises"),
+            write_atomic(
+                &dir.join(cache_name(&research.song)),
+                &serde_json::to_string(research).expect("serialises"),
             )
         })
         .map_err(|e| format!("Couldn't save the research: {e}"))
@@ -212,9 +228,9 @@ pub fn save_key(key: &str) -> Result<(), String> {
     };
     std::fs::create_dir_all(&dir)
         .and_then(|_| {
-            std::fs::write(
-                dir.join("settings.json"),
-                serde_json::to_string_pretty(&settings).expect("serialises"),
+            write_atomic(
+                &dir.join("settings.json"),
+                &serde_json::to_string_pretty(&settings).expect("serialises"),
             )
         })
         .map_err(|e| format!("Couldn't save the key: {e}"))
@@ -237,6 +253,10 @@ mod tests {
             "Gojira - Stranded (Live at Wembley)"
         );
         assert_eq!(song_from_title("riff 2.0 demo"), "riff 2.0 demo");
+        assert_eq!(
+            song_from_title("Song (Live) (Official Video)"),
+            "Song (Live)"
+        );
     }
 
     #[test]
@@ -276,9 +296,10 @@ mod tests {
     fn search_sends_the_key_and_keeps_sources() {
         let (base, server) = fake_tavily(
             "200 OK",
-            r#"{"query":"q","results":[{"title":"Rig Rundown","url":"https://example.com/rig","content":"He used a 5150.","score":0.9,"raw_content":"Full page text"}]}"#,
+            r#"{"query":"q","results":[{"title":"Rig Rundown","url":"https://example.com/rig","content":"He used a 5150.","score":0.9,"raw_content":"Full page text"},{"title":"Bad","url":"file:///C:/Windows/notepad.exe","content":"x","score":0.1}]}"#,
         );
         let research = search_at(&base, " tvly-test ", "Gojira - Stranded").unwrap();
+        assert_eq!(research.sources.len(), 1, "the file: link is dropped");
         let request = server.join().unwrap();
         assert!(
             request.contains("Bearer tvly-test"),

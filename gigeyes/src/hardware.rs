@@ -117,9 +117,17 @@ pub fn choose(hw: &Hardware) -> Choice {
     // On the CPU, bigger models are too slow to wait for, so stop at 4B.
     let budget = hw.ram_gb - RAM_RESERVE_GB;
     let model = [QWEN3_4B, QWEN3_1_7B].into_iter().find(|m| fits(m, budget));
+    // Say why the graphics card wasn't used: a card that's too small reads differently from no card.
+    let gpu_note = match &hw.gpu {
+        Some(g) => format!(
+            "Your {} has too little video memory to spare, so it",
+            g.name
+        ),
+        None => "It".to_string(),
+    };
     let reason = match model {
         Some(m) => format!(
-            "{} runs on the processor, using {:.1} GB of your {:.0} GB of memory. A graphics card with 4 GB or more would make it faster.",
+            "{} uses the processor. {gpu_note} takes {:.1} GB of your {:.0} GB of memory; a graphics card with 6 GB or more would be faster.",
             m.name,
             m.size_gb + CONTEXT_GB,
             hw.ram_gb
@@ -245,6 +253,11 @@ mod tests {
         // 4 GB minus the reserve leaves 2.5 GB, under even 1.7B plus context: the processor path wins.
         let small = choose(&pc(Vendor::Nvidia, 4.0, 16.0));
         assert_eq!((small.model, small.backend), (Some(QWEN3_4B), Backend::Cpu));
+        assert!(
+            small.reason.contains("too little video memory"),
+            "{}",
+            small.reason
+        );
         let amd = choose(&pc(Vendor::Amd, 16.0, 32.0));
         assert_eq!((amd.model, amd.backend), (Some(QWEN3_14B), Backend::Vulkan));
     }

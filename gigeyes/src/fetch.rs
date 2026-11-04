@@ -56,16 +56,26 @@ fn yt_dlp() -> PathBuf {
 pub fn download(link: &str, dir: &Path) -> Result<PathBuf, String> {
     let link = check_link(link)?;
     let mut cmd = Command::new(yt_dlp());
-    cmd.args(["--no-playlist", "--no-warnings"])
-        // m4a (AAC) first: GigEyes can't decode Opus, YouTube's other audio format.
-        .args([
-            "-f",
-            "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/best[ext=mp4]/bestaudio",
-        ])
-        .arg("-o")
-        .arg(dir.join("%(title).80B.%(ext)s"))
-        .arg("--")
-        .arg(link);
+    // No live streams (they'd record until the stream ends) and nothing over 300 MB.
+    cmd.args([
+        "--no-playlist",
+        "--no-warnings",
+        "--match-filter",
+        "!is_live",
+        "--max-filesize",
+        "300M",
+    ])
+    // m4a (AAC) first: GigEyes can't decode Opus, YouTube's other audio format.
+    .args([
+        "-f",
+        "bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/best[ext=mp4]/bestaudio",
+    ])
+    // Folder and name template apart: a % in the temp path must not be read as part of the template.
+    .arg("-P")
+    .arg(dir)
+    .args(["-o", "%(title).80B.%(ext)s"])
+    .arg("--")
+    .arg(link);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

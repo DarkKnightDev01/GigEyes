@@ -54,8 +54,9 @@ jobs:
           if (-not (Test-Path $key)) { throw "not listed in Installed apps" }
           if (-not (Test-Path $link)) { throw "no Start menu shortcut" }
           (Get-ItemProperty $key) | Select-Object DisplayName, DisplayVersion, InstallLocation, UninstallString | Format-List
-          $u = Start-Process "$dir\GigEyes\uninstall.exe" -Wait -PassThru -RedirectStandardError uninstall-errors.txt -ArgumentList '--uninstall', '--silent'
-          if ($u.ExitCode -ne 0) { Get-Content uninstall-errors.txt; throw "uninstall failed" }
+          # Started from inside the install folder, the way Installed apps may launch it.
+          $u = Start-Process "$dir\GigEyes\uninstall.exe" -WorkingDirectory "$dir\GigEyes" -Wait -PassThru -RedirectStandardError "$env:RUNNER_TEMP\uninstall-errors.txt" -ArgumentList '--uninstall', '--silent'
+          if ($u.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\uninstall-errors.txt"; throw "uninstall failed" }
           Start-Sleep -Seconds 6  # the uninstaller removes itself a moment after it exits
           if (Test-Path "$dir\GigEyes") { throw "install folder left behind: $(Get-ChildItem "$dir\GigEyes" -Name)" }
           if (Test-Path $key) { throw "still listed in Installed apps" }

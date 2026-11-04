@@ -50,7 +50,9 @@ pub fn read(setup: &Path) -> io::Result<Option<(Vec<Entry>, u64)>> {
             return Err(bad("unsafe file name in payload"));
         }
         entries.push(Entry { name, offset, len });
-        offset += len;
+        offset = offset
+            .checked_add(len)
+            .ok_or_else(|| bad("payload sizes overflow"))?;
     }
     if offset != index_start {
         return Err(bad("payload sizes don't add up"));

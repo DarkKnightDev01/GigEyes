@@ -44,20 +44,25 @@ fn main() {
     }
 
     let uninstalling = flag("--uninstall");
-    // The uninstaller lives in the install folder; the setup installs to the earlier place or the default.
-    let dir = value("--dir")
-        .map(|d| install::dir_inside(&d))
-        .unwrap_or_else(|| {
-            if uninstalling {
-                me.parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(install::default_dir)
-            } else {
-                install::existing()
-                    .map(|(dir, _)| dir)
-                    .unwrap_or_else(install::default_dir)
+    // Both install and removal target the recorded install. Removal falls back to the program's own
+    // folder only when that folder really is an install (it holds the uninstaller), so a stray
+    // `GigEyes-Setup.exe --uninstall` in Downloads can't delete files that happen to share a name.
+    let here = me
+        .parent()
+        .map(Path::to_path_buf)
+        .filter(|d| d.join("uninstall.exe").is_file());
+    let dir = match (value("--dir"), install::existing()) {
+        (Some(picked), _) => install::dir_inside(&picked),
+        (None, Some((recorded, _))) => recorded,
+        (None, None) if uninstalling => match here {
+            Some(dir) => dir,
+            None => {
+                eprintln!("GigEyes isn't installed here.");
+                std::process::exit(1);
             }
-        });
+        },
+        (None, None) => install::default_dir(),
+    };
 
     if flag("--silent") {
         let result = if uninstalling {

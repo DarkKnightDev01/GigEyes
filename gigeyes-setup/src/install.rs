@@ -68,8 +68,10 @@ pub fn install(setup: &Path, opts: &Options, mut step: impl FnMut(&str)) -> Resu
         step(&format!("Copying {}…", entry.name));
         let target = opts.dir.join(&entry.name);
         let fresh = opts.dir.join(format!("{}.new", entry.name));
-        payload::extract(setup, entry, &fresh)
-            .map_err(|e| format!("Couldn't write {}: {e}", entry.name))?;
+        payload::extract(setup, entry, &fresh).map_err(|e| {
+            let _ = std::fs::remove_file(&fresh);
+            format!("Couldn't write {}: {e}", entry.name)
+        })?;
         // Swap in place: if the old file is in use (GigEyes still open), nothing is half-replaced.
         std::fs::rename(&fresh, &target).map_err(|_| {
             let _ = std::fs::remove_file(&fresh);
@@ -88,7 +90,7 @@ pub fn install(setup: &Path, opts: &Options, mut step: impl FnMut(&str)) -> Resu
 /// Remove GigEyes from `dir`: its own files, shortcuts and the installed-apps entry, and the user's
 /// GigEyes settings and research too when `remove_data` is set. Other files in `dir` are left alone.
 pub fn uninstall(dir: &Path, remove_data: bool) -> Result<(), String> {
-    system::remove();
+    // Files first: if GigEyes is still open, the Installed-apps entry and shortcuts stay so "Try again" works.
     for name in ["gigeyes.exe", "yt-dlp.exe"] {
         match std::fs::remove_file(dir.join(name)) {
             Ok(()) => {}
@@ -96,6 +98,7 @@ pub fn uninstall(dir: &Path, remove_data: bool) -> Result<(), String> {
             Err(_) => return Err(format!("{name} is in use. Close GigEyes, then try again.")),
         }
     }
+    system::remove();
     if remove_data && let Some(data) = dirs::config_dir().map(|d| d.join(APP)) {
         let _ = std::fs::remove_dir_all(data);
     }
@@ -181,7 +184,9 @@ mod system {
         );
         // raw_arg: cmd has its own quoting rules, so the line goes over exactly as written.
         // /S /C "…" strips only the outer quotes and keeps the ones around each path.
+        // Run from the temp folder: a cmd sitting in the install folder would keep rmdir from removing it.
         let _ = std::process::Command::new("cmd")
+            .current_dir(std::env::temp_dir())
             .raw_arg(format!("/S /C \"{script}\""))
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
@@ -258,7 +263,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
-        assert!(!dir.join(UNINSTALLER).exists(), "the uninstaller removed itself");
+        assert!(
+            !dir.join(UNINSTALLER).exists(),
+            "the uninstaller removed itself"
+        );
         assert!(
             dir.join("my-notes.txt").exists(),
             "a file GigEyes didn't put there survives"

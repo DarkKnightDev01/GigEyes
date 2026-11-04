@@ -166,9 +166,9 @@ pub fn save(plugins: &[Plugin]) -> Result<(), String> {
     let file = rig_file().ok_or("Can't find a settings folder on this PC.")?;
     std::fs::create_dir_all(file.parent().expect("rig file has a parent folder"))
         .and_then(|_| {
-            std::fs::write(
+            crate::research::write_atomic(
                 &file,
-                serde_json::to_string_pretty(plugins).expect("plugins serialise"),
+                &serde_json::to_string_pretty(plugins).expect("plugins serialise"),
             )
         })
         .map_err(|e| format!("Couldn't save your rig to {}: {e}", file.display()))

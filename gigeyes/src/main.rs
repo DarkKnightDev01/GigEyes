@@ -527,6 +527,7 @@ impl eframe::App for App {
                 Ok((name, tone)) => {
                     self.song = research::song_from_title(&name);
                     self.research = research::cached(&self.song);
+                    self.research_job = None; // a search still running was for the previous song
                     self.research_note = None;
                     State::Done(name, tone)
                 }
