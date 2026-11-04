@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 eframe = "0.37.0"
+egui_extras = { version = "0.37.0", features = ["svg"] }
 realfft = "3.5.1"
 rfd = "0.17.2"
 symphonia = { version = "0.6.1", default-features = false, features = ["wav", "pcm", "mp3", "flac", "aac", "isomp4", "ogg", "vorbis", "mkv"] }

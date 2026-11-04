@@ -17,7 +17,23 @@ pub struct Tone {
     /// Peak-to-average ratio. Low = squashed (high gain or heavy compression), high = dynamic.
     pub crest_db: f32,
     pub seconds: f32,
-    pub summary: Vec<String>,
+    /// Gain, Brightness, Mids, Low end: in that order.
+    pub summary: Vec<Reading>,
+}
+
+/// One plain-language reading, e.g. label "Mids", verdict "Scooped", detail "800 Hz–2 kHz sits 5 dB below…".
+pub struct Reading {
+    pub label: &'static str,
+    pub verdict: &'static str,
+    pub detail: String,
+}
+
+fn reading(label: &'static str, verdict: &'static str, detail: impl Into<String>) -> Reading {
+    Reading {
+        label,
+        verdict,
+        detail: detail.into(),
+    }
 }
 
 /// Samples per loudness block for the peak-to-average measure.
@@ -171,36 +187,50 @@ fn describe(power: Vec<f32>, crest_db: f32, seconds: f32, rate: u32) -> Tone {
         region(2000.0, 5000.0),
     );
 
-    let mut summary = vec![];
     // shortcut: thresholds are rough guesses for guitar, tune them against real reference tracks.
-    summary.push(match crest_db {
-        c if c < 6.0 => "Squashed and saturated: high gain or heavy compression.".to_string(),
-        c if c < 10.0 => "Some drive or compression: crunchy, not fully clean.".to_string(),
-        _ => "Dynamic: clean or lightly driven.".to_string(),
-    });
-    summary.push(match tilt_db_per_octave {
-        t if t > -3.0 => "Bright overall.".to_string(),
-        t if t < -7.0 => "Dark overall.".to_string(),
-        _ => "Balanced brightness.".to_string(),
-    });
+    let gain = match crest_db {
+        c if c < 6.0 => reading(
+            "Gain",
+            "High gain",
+            "Squashed and saturated, or heavily compressed.",
+        ),
+        c if c < 10.0 => reading(
+            "Gain",
+            "Crunch",
+            "Some drive or compression, not fully clean.",
+        ),
+        _ => reading("Gain", "Clean", "Dynamic: clean or lightly driven."),
+    };
+    let slope_text = format!("Falls {:.1} dB per octave.", -tilt_db_per_octave);
+    let brightness = match tilt_db_per_octave {
+        t if t > -3.0 => reading("Brightness", "Bright", slope_text),
+        t if t < -7.0 => reading("Brightness", "Dark", slope_text),
+        _ => reading("Brightness", "Balanced", slope_text),
+    };
     let scoop = mids - (low_mids + highs) / 2.0;
-    summary.push(if scoop < -4.0 {
-        format!(
-            "Scooped mids: 800 Hz–2 kHz sits {:.0} dB below its neighbours.",
-            -scoop
+    let mid_reading = if scoop < -4.0 {
+        reading(
+            "Mids",
+            "Scooped",
+            format!("800 Hz–2 kHz sits {:.0} dB below its neighbours.", -scoop),
         )
     } else if scoop > 3.0 {
-        format!("Mid-forward: 800 Hz–2 kHz sits {scoop:.0} dB above its neighbours.")
+        reading(
+            "Mids",
+            "Pushed",
+            format!("800 Hz–2 kHz sits {scoop:.0} dB above its neighbours."),
+        )
     } else {
-        "Mids are neither scooped nor pushed.".to_string()
-    });
-    summary.push(if lows - low_mids > 2.0 {
-        "Big low end.".to_string()
+        reading("Mids", "Even", "Neither scooped nor pushed.")
+    };
+    let low_end = if lows - low_mids > 2.0 {
+        reading("Low end", "Big", "Lots of weight below 250 Hz.")
     } else if lows - low_mids < -6.0 {
-        "Tight low end: little below 250 Hz.".to_string()
+        reading("Low end", "Tight", "Little below 250 Hz.")
     } else {
-        "Moderate low end.".to_string()
-    });
+        reading("Low end", "Moderate", "Some weight below 250 Hz.")
+    };
+    let summary = vec![gain, brightness, mid_reading, low_end];
 
     Tone {
         centers,
@@ -308,7 +338,7 @@ mod tests {
             white.tilt_db_per_octave
         );
         assert!(dark.tilt_db_per_octave < white.tilt_db_per_octave - 3.0);
-        assert!(dark.summary.iter().any(|s| s.starts_with("Dark")));
+        assert_eq!(dark.summary[1].verdict, "Dark");
     }
 
     #[test]
@@ -317,7 +347,7 @@ mod tests {
         let driven = analyze(&plucks(40.0), RATE);
         assert!(clean.crest_db > 10.0, "clean crest {}", clean.crest_db);
         assert!(driven.crest_db < 6.0, "driven crest {}", driven.crest_db);
-        assert!(driven.summary[0].starts_with("Squashed"));
+        assert_eq!(driven.summary[0].verdict, "High gain");
     }
 
     #[test]
