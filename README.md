@@ -33,7 +33,9 @@ Builds of every push, between releases, are under **Actions → Windows build �
 
 Drop an audio or video file into the window, or click **Choose file…**. You can also drop a file onto `gigeyes.exe` itself.
 
-- Supported: wav, mp3, flac, ogg, m4a, mp4, mkv. Not yet: webm and opus.
+Or paste a link (YouTube and [most other video sites](https://github.com/yt-dlp/yt-dlp/blob/master/supportedsites.md)) and click **Load**. GigEyes downloads only the audio into a temporary folder, reads it, and deletes the download straight away. This uses [yt-dlp](https://github.com/yt-dlp/yt-dlp), which comes in the zip as `yt-dlp.exe`. If links stop working, the site has probably changed; update yt-dlp by running `.\yt-dlp.exe -U` in the GigEyes folder. Only download what you're allowed to.
+
+- Supported files: wav, mp3, flac, ogg, m4a, mp4, mkv. Not yet: webm and opus files (links work, because GigEyes asks for a format it can read).
 - An isolated guitar track gives the most accurate result. On a full mix, bass, drums and vocals colour it.
 - The "how compressed" reading is a rough guess for now and will be tuned against real recordings.
 

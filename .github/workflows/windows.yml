@@ -20,6 +20,16 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
       - run: cargo build --release --workspace
+      # Link support: ship yt-dlp.exe next to gigeyes.exe, only if it matches yt-dlp's published checksum.
+      - name: Fetch yt-dlp
+        run: |
+          $base = "https://github.com/yt-dlp/yt-dlp/releases/latest/download"
+          Invoke-WebRequest "$base/yt-dlp.exe" -OutFile target/release/yt-dlp.exe
+          Invoke-WebRequest "$base/SHA2-256SUMS" -OutFile yt-dlp-sums.txt
+          $line = Get-Content yt-dlp-sums.txt | Where-Object { $_ -match ' yt-dlp\.exe$' }
+          $want = ($line -split ' ')[0]
+          $got = (Get-FileHash target/release/yt-dlp.exe -Algorithm SHA256).Hash.ToLower()
+          if (-not $want -or $got -ne $want) { throw "yt-dlp.exe checksum mismatch: got $got, expected $want" }
       - uses: actions/upload-artifact@v6
         with:
           name: gigeyes-windows

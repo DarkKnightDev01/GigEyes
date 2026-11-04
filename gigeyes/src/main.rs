@@ -3,6 +3,7 @@
 
 mod analysis;
 mod decode;
+mod fetch;
 
 use analysis::Tone;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, RichText, Sense, Stroke, StrokeKind, Vec2};
@@ -33,47 +34,71 @@ fn main() -> eframe::Result {
     )
 }
 
+#[derive(Default)]
 enum State {
+    #[default]
     Empty,
     Reading(String),
     Done(String, Tone),
     Failed(String),
 }
 
+/// What a background job sends back: the name to show, and the tone.
+type Outcome = Result<(String, Tone), String>;
+
+#[derive(Default)]
 struct App {
     state: State,
-    result: Option<Receiver<Result<Tone, String>>>,
+    result: Option<Receiver<Outcome>>,
+    link: String,
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self { state: State::Empty, result: None }
-    }
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+}
+
+fn read_tone(path: &std::path::Path) -> Outcome {
+    decode::decode(path).map(|(samples, rate)| (file_name(path), analysis::analyze(&samples, rate)))
 }
 
 impl App {
-    fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    /// Run `job` off the UI thread (decoding a song takes a moment) and show `label` meanwhile.
+    fn start(&mut self, label: String, ctx: &egui::Context, job: impl FnOnce() -> Outcome + Send + 'static) {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
-        // Decoding a whole song takes a moment; keep the window responsive.
         thread::spawn(move || {
-            let _ = tx.send(decode::decode(&path).map(|(samples, rate)| analysis::analyze(&samples, rate)));
+            let _ = tx.send(job());
             ctx.request_repaint();
         });
-        self.state = State::Reading(name);
+        self.state = State::Reading(label);
         self.result = Some(rx);
+    }
+
+    fn open(&mut self, path: PathBuf, ctx: &egui::Context) {
+        self.start(format!("Reading {}…", file_name(&path)), ctx, move || read_tone(&path));
+    }
+
+    fn open_link(&mut self, ctx: &egui::Context) {
+        let link = match fetch::check_link(&self.link) {
+            Ok(link) => link.to_string(),
+            Err(e) => return self.state = State::Failed(e),
+        };
+        self.start("Downloading the audio and reading it…".into(), ctx, move || {
+            // The folder and the download are deleted when `temp` goes out of scope, even on errors.
+            let temp = fetch::TempDir::new()?;
+            read_tone(&fetch::download(&link, &temp.0)?)
+        });
     }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if let (Some(rx), State::Reading(name)) = (&self.result, &self.state)
+        if let Some(rx) = &self.result
             && let Ok(result) = rx.try_recv()
         {
             self.state = match result {
-                Ok(tone) => State::Done(name.clone(), tone),
+                Ok((name, tone)) => State::Done(name, tone),
                 Err(e) => State::Failed(e),
             };
             self.result = None;
@@ -95,6 +120,21 @@ impl eframe::App for App {
                         self.open(path, &ctx);
                     }
                 }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    let button_width = 80.0;
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut self.link)
+                            .hint_text("…or paste a YouTube or other video link")
+                            .desired_width(ui.available_width() - button_width - ui.spacing().item_spacing.x),
+                    );
+                    let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let busy = matches!(self.state, State::Reading(_));
+                    let load = ui.add_enabled(!busy, egui::Button::new("Load").min_size(Vec2::new(button_width, 0.0)));
+                    if (load.clicked() || enter) && !busy {
+                        self.open_link(&ctx);
+                    }
+                });
                 ui.add_space(8.0);
                 ui.label(
                     RichText::new(
@@ -107,10 +147,10 @@ impl eframe::App for App {
 
                 match &self.state {
                     State::Empty => {}
-                    State::Reading(name) => {
+                    State::Reading(label) => {
                         ui.horizontal(|ui| {
                             ui.spinner();
-                            ui.label(format!("Reading {name}…"));
+                            ui.label(label);
                         });
                     }
                     State::Failed(e) => {
