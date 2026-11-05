@@ -21,6 +21,8 @@ use std::thread;
 
 /// How long the knobs take to turn to a new result.
 const REVEAL_SECS: f64 = 0.8;
+/// Past this, lines and knob rows get too wide to read; the column centres instead.
+const MAX_WIDTH: f32 = 760.0;
 
 const AUDIO_TYPES: [&str; 9] = [
     "wav", "mp3", "flac", "ogg", "m4a", "mp4", "aac", "mkv", "mov",
@@ -170,7 +172,7 @@ impl App {
         let busy = matches!(self.state, State::Reading(_));
         let has_result = matches!(self.state, State::Done(..));
         // Before the first result the drop zone leads; afterwards the result does and inputs shrink to a row.
-        if !has_result && drop_zone(ui, hovering) {
+        if !has_result && drop_zone(ui, hovering, busy) {
             self.pick_file(ctx);
         }
         ui.add_space(12.0);
@@ -256,7 +258,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 let button_width = 120.0;
-                ui.add(
+                let field = ui.add(
                     egui::TextEdit::singleline(&mut self.song)
                         .hint_text("Artist - Song")
                         .margin(Vec2::new(10.0, 7.0))
@@ -264,6 +266,7 @@ impl App {
                             ui.available_width() - button_width - ui.spacing().item_spacing.x,
                         ),
                 );
+                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 let label = if self.research.is_some() {
                     "Search again"
                 } else {
@@ -273,7 +276,7 @@ impl App {
                     !searching,
                     egui::Button::new(label).min_size(Vec2::new(button_width, 0.0)),
                 );
-                if go.clicked() {
+                if (go.clicked() || enter) && !searching && !self.song.trim().is_empty() {
                     let (tx, rx) = mpsc::channel();
                     let (key, song, ctx) =
                         (self.tavily_key.clone(), self.song.clone(), ctx.clone());
@@ -398,26 +401,27 @@ impl App {
                 ui.add_space(10.0);
                 let filter = self.rig_filter.to_lowercase();
                 card(ui, |ui| {
+                    let mut shown = 0;
                     for plugin in plugins.iter_mut().filter(|p| {
                         filter.is_empty()
                             || p.name.to_lowercase().contains(&filter)
                             || p.vendor.to_lowercase().contains(&filter)
                     }) {
-                        ui.horizontal(|ui| {
-                            changed |= ui.checkbox(&mut plugin.owned, "").changed();
-                            ui.vertical(|ui| {
-                                ui.label(semibold(&plugin.name, 15.0));
-                                let about: Vec<&str> =
-                                    [plugin.vendor.as_str(), plugin.kind.as_str()]
-                                        .into_iter()
-                                        .filter(|s| !s.is_empty())
-                                        .collect();
-                                if !about.is_empty() {
-                                    ui.label(RichText::new(about.join(" · ")).size(13.0).weak());
-                                }
-                            });
-                        });
-                        ui.add_space(6.0);
+                        if shown > 0 {
+                            ui.add_space(10.0);
+                        }
+                        shown += 1;
+                        let about: Vec<&str> = [plugin.vendor.as_str(), plugin.kind.as_str()]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect();
+                        let detail = (!about.is_empty())
+                            .then(|| RichText::new(about.join(" · ")).size(13.0).weak());
+                        changed |=
+                            tick(ui, &mut plugin.owned, semibold(&plugin.name, 15.0), detail);
+                    }
+                    if shown == 0 {
+                        ui.label(RichText::new("No plugin or maker matches that.").weak());
                     }
                 });
             }
@@ -445,8 +449,9 @@ impl App {
                     .password(true)
                     .margin(Vec2::new(10.0, 7.0))
                     .desired_width(320.0);
-                ui.add(field);
-                if ui.button("Save key").clicked() {
+                let enter =
+                    ui.add(field).lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Save key").clicked() || enter {
                     self.key_note = Some(match research::save_key(&self.tavily_key) {
                         Ok(()) if self.tavily_key.trim().is_empty() => "Key removed.".into(),
                         Ok(()) => "Saved.".into(),
@@ -560,24 +565,47 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
+        let margin = egui::Margin {
+            top: 28,
+            ..Default::default()
+        };
         egui::CentralPanel::default()
-            .frame(egui::Frame::central_panel(ui.style()).inner_margin(32.0))
+            .frame(egui::Frame::central_panel(ui.style()).inner_margin(margin))
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    header(ui, &mut self.screen);
-                    ui.add_space(24.0);
-
-                    match self.screen {
-                        Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
-                        Screen::Rig => self.rig_view(ui),
-                    }
-                });
+                // One readable column, centred on wide windows; the scrollbar stays at the window's edge.
+                let side = ((ui.available_width() - MAX_WIDTH) / 2.0).max(32.0);
+                let width = ui.available_width() - 2.0 * side;
+                column(ui, side, width, |ui| header(ui, &mut self.screen));
+                ui.add_space(20.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink(false)
+                    .show(ui, |ui| {
+                        column(ui, side, width, |ui| {
+                            ui.add_space(4.0);
+                            match self.screen {
+                                Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
+                                Screen::Rig => self.rig_view(ui),
+                            }
+                            ui.add_space(32.0);
+                        });
+                    });
             });
 
         if hovering {
             drop_overlay(&ctx);
         }
     }
+}
+
+/// `width` wide, `side` in from the left.
+fn column(ui: &mut egui::Ui, side: f32, width: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(side);
+        ui.vertical(|ui| {
+            ui.set_width(width);
+            add(ui);
+        });
+    });
 }
 
 /// Fast start, gentle stop, no overshoot.
@@ -629,7 +657,7 @@ fn listening(ui: &mut egui::Ui) {
 }
 
 /// The big "drop a file here" area. Returns true when its button was clicked.
-fn drop_zone(ui: &mut egui::Ui, hovering: bool) -> bool {
+fn drop_zone(ui: &mut egui::Ui, hovering: bool, busy: bool) -> bool {
     let stroke = if hovering {
         Stroke::new(2.0, ACCENT)
     } else {
@@ -651,7 +679,7 @@ fn drop_zone(ui: &mut egui::Ui, hovering: bool) -> bool {
                 ui.add_space(18.0);
                 let button =
                     egui::Button::new(semibold("Choose file…", 15.0).color(GROUND)).fill(ACCENT);
-                ui.add(button).clicked()
+                ui.add_enabled(!busy, button).clicked()
             })
             .inner
         })
@@ -751,7 +779,7 @@ fn waiting_knobs() -> Vec<Knob> {
         .map(|label| Knob {
             label,
             value: 5.0,
-            verdict: "Waiting",
+            verdict: " ", // keeps the row's height, so nothing jumps when the result lands
             detail: "Nothing listened to yet.".into(),
         })
         .into()

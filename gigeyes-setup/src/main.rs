@@ -270,10 +270,15 @@ impl Setup {
                     }
                 });
             });
-            ui.add_space(12.0);
-            ui.checkbox(&mut self.opts.start_menu, "Start menu shortcut");
-            ui.checkbox(&mut self.opts.desktop, "Desktop shortcut");
-            ui.checkbox(&mut self.open_after, "Open GigEyes when it's done");
+            ui.add_space(14.0);
+            for (on, text) in [
+                (&mut self.opts.start_menu, "Start menu shortcut"),
+                (&mut self.opts.desktop, "Desktop shortcut"),
+                (&mut self.open_after, "Open GigEyes when it's done"),
+            ] {
+                tick(ui, on, RichText::new(text), None);
+                ui.add_space(6.0);
+            }
         });
         ui.add_space(10.0);
         ui.label(
@@ -321,9 +326,11 @@ impl Setup {
                     .weak(),
             );
             ui.add_space(12.0);
-            ui.checkbox(
+            tick(
+                ui,
                 &mut self.remove_data,
-                "Also delete my rig, saved research and search key",
+                RichText::new("Also delete my rig, saved research and search key"),
+                None,
             );
         });
         ui.add_space(24.0);

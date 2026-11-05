@@ -74,7 +74,11 @@ pub fn song_from_title(title: &str) -> String {
             }
         }
     }
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+    // Downloaded files often use underscores for spaces: "Artist_-_Song".
+    s.replace('_', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn query_for(song: &str) -> String {
@@ -253,6 +257,7 @@ mod tests {
             "Gojira - Stranded (Live at Wembley)"
         );
         assert_eq!(song_from_title("riff 2.0 demo"), "riff 2.0 demo");
+        assert_eq!(song_from_title("Pantera_-_Walk_[HD].mp3"), "Pantera - Walk");
         assert_eq!(
             song_from_title("Song (Live) (Official Video)"),
             "Song (Live)"

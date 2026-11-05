@@ -117,6 +117,72 @@ pub fn mark(ui: &mut egui::Ui, size: f32) {
     }
 }
 
+/// A checkbox row that reads at a glance: amber when ticked, outlined when not. The whole row toggles it,
+/// by mouse or by Space on keyboard focus. Returns true when it was toggled.
+pub fn tick(ui: &mut egui::Ui, on: &mut bool, title: RichText, detail: Option<RichText>) -> bool {
+    let name = title.text().to_string();
+    let backdrop = ui.painter().add(Shape::Noop);
+    let row = ui.horizontal_top(|ui| {
+        // Plain labels, so a click on the name reaches the row instead of starting a text selection.
+        ui.style_mut().interaction.selectable_labels = false;
+        let (mark, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.label(title);
+            if let Some(detail) = detail {
+                ui.label(detail);
+            }
+        });
+        mark
+    });
+    let rect = row.response.rect;
+    let area = egui::Rect::from_min_max(rect.min, Pos2::new(ui.max_rect().right(), rect.max.y))
+        .expand2(Vec2::new(8.0, 4.0));
+    let mut response = ui.interact(area, row.response.id.with("tick"), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, &name));
+
+    let corner = CornerRadius::same(6);
+    if response.hovered() || response.has_focus() {
+        ui.painter().set(
+            backdrop,
+            Shape::rect_filled(area, corner, RAISED.gamma_multiply(0.7)),
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            area,
+            corner,
+            Stroke::new(1.0, MUTED),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let b = egui::Rect::from_center_size(row.inner.center(), Vec2::splat(16.0));
+    if *on {
+        ui.painter().rect_filled(b, CornerRadius::same(4), ACCENT);
+        let check = vec![
+            Pos2::new(b.left() + 3.5, b.center().y),
+            Pos2::new(b.left() + 6.5, b.bottom() - 4.0),
+            Pos2::new(b.right() - 3.5, b.top() + 4.0),
+        ];
+        ui.painter()
+            .add(Shape::line(check, Stroke::new(2.0, GROUND)));
+    } else {
+        let edge = if response.hovered() { INK } else { MUTED };
+        ui.painter().rect(
+            b,
+            CornerRadius::same(4),
+            WELL,
+            Stroke::new(1.5, edge),
+            egui::StrokeKind::Inside,
+        );
+    }
+    response.changed()
+}
+
 /// A rounded panel one tone step above the ground, used for every block of content.
 pub fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::new()
