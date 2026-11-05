@@ -44,8 +44,9 @@ jobs:
       - name: Install and uninstall on this Windows machine
         run: |
           $dir = "$env:RUNNER_TEMP\InstallTest"
-          $key = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes"
-          $link = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\GigEyes.lnk"
+          # Machine-wide since 0.4.1: Installed apps for everyone, shared Start menu. (The runner is an administrator.)
+          $key = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes"
+          $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\GigEyes.lnk"
           $p = Start-Process dist/GigEyes-Setup.exe -Wait -PassThru -RedirectStandardError install-errors.txt -ArgumentList '--silent', '--dir', $dir
           if ($p.ExitCode -ne 0) { Get-Content install-errors.txt; throw "install failed" }
           foreach ($f in 'gigeyes.exe', 'yt-dlp.exe', 'uninstall.exe') {

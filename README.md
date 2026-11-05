@@ -28,11 +28,11 @@ Windows 10 or 11.
 
 1. Download `GigEyes-Setup-….exe` from the newest pre-release on the [Releases page](https://github.com/DarkKnightDev01/GigEyes/releases). It's one file with everything in it.
 2. Run it. If Windows shows "Windows protected your PC", click **More info → Run anyway**: the setup isn't code-signed yet.
-3. Click **Install GigEyes**. It installs for your Windows account only, with no admin prompt, into `%LOCALAPPDATA%\Programs\GigEyes`.
+3. Click **Install GigEyes** and say **Yes** when Windows asks for permission. GigEyes installs into `C:\Program Files\GigEyes` for everyone on the PC; your rig, research and settings stay in your own account. An older copy in `%LOCALAPPDATA%\Programs\GigEyes` is removed.
 
 The setup also offers to download the local AI picked for your PC (Qwen3 8B is 5 GB on an 8 GB graphics card). Untick **Download the local AI** to skip it, or click **Skip the AI download** while it runs; the app is installed either way.
 
-To update, run a newer setup: your rig, research and search key stay. To remove GigEyes, use **Settings → Remove all GigEyes files** inside the app (deletes your data and the AI, then opens the uninstaller), or **Windows Settings → Apps → Installed apps → GigEyes → Uninstall**. Both remove only what GigEyes put there.
+**Updates are automatic from 0.4.1 on:** each time GigEyes opens it checks GitHub, and when a newer version is out a banner offers **Update now**. GigEyes downloads the new setup, checks it against GitHub's published checksum, and installs it (Windows asks for permission once), then reopens. Your rig, research and search key stay. **Settings → Updates → Check now** checks on demand. To remove GigEyes, use **Settings → Remove all GigEyes files** inside the app (deletes your data and the AI, then opens the uninstaller), or **Windows Settings → Apps → Installed apps → GigEyes → Uninstall**. Both remove only what GigEyes put there.
 
 Builds of every push, between releases, are under **Actions → Windows build → a run → Artifacts**.
 

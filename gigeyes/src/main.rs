@@ -9,6 +9,7 @@ mod look;
 mod model;
 mod research;
 mod rig;
+mod update;
 
 use analysis::{Knob, Tone};
 use eframe::egui::{
@@ -17,6 +18,8 @@ use eframe::egui::{
 };
 use look::*;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -56,6 +59,7 @@ fn main() -> eframe::Result {
                 tavily_key: settings.tavily_key,
                 ..App::default()
             };
+            app.check_updates(&cc.egui_ctx);
             if let Some(path) = initial {
                 app.open(path, &cc.egui_ctx);
             }
@@ -98,6 +102,19 @@ struct App {
     /// "Remove all files" asks once more before deleting.
     confirm_remove: bool,
     remove_note: Option<String>,
+    confirm_at: f64,
+    /// Updates: the check at start, a newer release if there is one, and its download.
+    update_check: Option<Receiver<Result<Option<update::Update>, String>>>,
+    update: Option<update::Update>,
+    update_at: f64,
+    update_note: Option<String>,
+    update_job: Option<Receiver<Result<PathBuf, String>>>,
+    update_done: Arc<AtomicU64>,
+    /// Which screen is showing and since when, for its entrance.
+    shown: (Screen, bool),
+    shown_at: f64,
+    /// The old background while light and dark mode crossfade.
+    theme_fade: Option<(Color32, f64)>,
     /// Read once, the first time the rig screen opens.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
 }
@@ -446,19 +463,19 @@ impl App {
         card(ui, |ui| {
             ui.label(semibold("Appearance", 17.0));
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let light = ctx.theme() == egui::Theme::Light;
-                for (pick_light, label) in [(false, "Dark"), (true, "Light")] {
-                    if ui.selectable_label(light == pick_light, label).clicked()
-                        && light != pick_light
-                    {
-                        apply_theme(ctx, pick_light);
-                        let mut settings = research::load_settings();
-                        settings.light = pick_light;
-                        self.key_note = research::save_settings(&settings).err();
-                    }
-                }
-            });
+            let mut light = ctx.theme() == egui::Theme::Light;
+            if segmented(
+                ui,
+                "appearance",
+                &mut light,
+                &[(false, "Dark"), (true, "Light")],
+            ) {
+                self.theme_fade = Some((ground(), ctx.input(|i| i.time)));
+                apply_theme(ctx, light);
+                let mut settings = research::load_settings();
+                settings.light = light;
+                self.key_note = research::save_settings(&settings).err();
+            }
         });
 
         ui.add_space(14.0);
@@ -539,6 +556,30 @@ impl App {
         });
 
         ui.add_space(14.0);
+        card(ui, |ui| {
+            ui.label(semibold("Updates", 17.0));
+            ui.label(
+                RichText::new(format!(
+                    "This is GigEyes {VERSION}. Each time it opens, GigEyes checks GitHub for a newer version."
+                ))
+                .size(13.0)
+                .weak(),
+            );
+            if let Some(note) = &self.update_note {
+                ui.add_space(6.0);
+                ui.label(RichText::new(note).size(13.0));
+            }
+            ui.add_space(10.0);
+            let idle = self.update_check.is_none() && self.update_job.is_none();
+            if ui
+                .add_enabled(idle, egui::Button::new("Check now"))
+                .clicked()
+            {
+                self.check_updates(ctx);
+            }
+        });
+
+        ui.add_space(14.0);
         let uninstaller = uninstaller();
         card(ui, |ui| {
             ui.label(semibold("Remove all GigEyes files", 17.0));
@@ -552,20 +593,23 @@ impl App {
             if !self.confirm_remove {
                 if ui.button("Remove all files…").clicked() {
                     self.confirm_remove = true;
+                    self.confirm_at = ctx.input(|i| i.time);
                     self.remove_note = None;
                 }
             } else {
-                ui.label(semibold("This can't be undone. Remove everything?", 15.0));
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    let remove =
-                        egui::Button::new(semibold("Remove everything", 15.0).color(error()));
-                    if ui.add(remove).clicked() {
-                        self.remove_all(ctx, uninstaller.as_deref());
-                    }
-                    if ui.button("Cancel").clicked() {
-                        self.confirm_remove = false;
-                    }
+                enter(ui, self.confirm_at, |ui| {
+                    ui.label(semibold("This can't be undone. Remove everything?", 15.0));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        let remove =
+                            egui::Button::new(semibold("Remove everything", 15.0).color(error()));
+                        if ui.add(remove).clicked() {
+                            self.remove_all(ctx, uninstaller.as_deref());
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.confirm_remove = false;
+                        }
+                    });
                 });
             }
             if let Some(note) = &self.remove_note {
@@ -573,12 +617,92 @@ impl App {
                 ui.label(RichText::new(note).size(13.0));
             }
         });
+    }
+
+    fn check_updates(&mut self, ctx: &egui::Context) {
+        let (tx, rx) = mpsc::channel();
+        let ctx = ctx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(update::check(VERSION));
+            ctx.request_repaint();
+        });
+        self.update_check = Some(rx);
+        self.update_note = Some("Checking for updates…".into());
+    }
+
+    /// Download the newer setup in the background; once it's checked, it runs and GigEyes closes.
+    fn start_update(&mut self, ctx: &egui::Context) {
+        let Some(found) = self.update.clone() else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let (done, ctx) = (self.update_done.clone(), ctx.clone());
+        done.store(0, Ordering::Relaxed);
+        thread::spawn(move || {
+            let result = update::download(&found, |bytes| {
+                done.store(bytes, Ordering::Relaxed);
+                ctx.request_repaint();
+            });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.update_job = Some(rx);
+        self.update_note = None;
+    }
+
+    /// "GigEyes 0.4.2 is out", above every screen, until it's installed.
+    fn update_banner(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let Some(found) = self.update.clone() else {
+            return;
+        };
+        enter(ui, self.update_at, |ui| {
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(semibold(format!("GigEyes {} is out", found.version), 16.0));
+                        ui.hyperlink_to(
+                            RichText::new("What's new")
+                                .size(13.0)
+                                .color(ui.visuals().hyperlink_color),
+                            &found.page,
+                        );
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if self.update_job.is_some() {
+                            ui.label(RichText::new("Downloading…").weak());
+                        } else {
+                            let go =
+                                egui::Button::new(semibold("Update now", 15.0).color(ON_ACCENT))
+                                    .fill(accent());
+                            if ui.add(go).clicked() {
+                                self.start_update(ctx);
+                            }
+                        }
+                    });
+                });
+                if self.update_job.is_some() {
+                    let target =
+                        self.update_done.load(Ordering::Relaxed) as f32 / found.bytes.max(1) as f32;
+                    let shown = ctx.animate_value_with_time(
+                        egui::Id::NULL.with("update-bar"),
+                        target,
+                        secs(0.3),
+                    );
+                    ui.add_space(10.0);
+                    ui.add(
+                        egui::ProgressBar::new(shown)
+                            .fill(accent())
+                            .desired_height(6.0)
+                            .corner_radius(3),
+                    );
+                }
+                if let Some(note) = &self.update_note {
+                    ui.add_space(8.0);
+                    ui.colored_label(error(), note);
+                }
+            });
+        });
         ui.add_space(14.0);
-        ui.label(
-            RichText::new(format!("GigEyes {VERSION}"))
-                .size(12.0)
-                .weak(),
-        );
     }
 
     /// Delete everything GigEyes saved, then hand over to the uninstaller for the app itself.
@@ -610,12 +734,12 @@ impl App {
         (self.rig, self.research, self.key_note) = (None, None, None);
         self.tavily_key.clear();
         self.remove_note = Some(match uninstaller {
-            Some(path) => match std::process::Command::new(path).arg("--uninstall").spawn() {
-                Ok(_) => {
+            Some(path) => match update::run_as_admin(path, "--uninstall") {
+                Ok(()) => {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     "Your files are removed. Opening the uninstaller…".into()
                 }
-                Err(e) => format!("Your files are removed, but the uninstaller didn't start: {e}"),
+                Err(e) => format!("Your files are removed, but the uninstaller didn't start. {e}"),
             },
             None => "All GigEyes files are removed.".into(),
         });
@@ -693,8 +817,36 @@ impl eframe::App for App {
         {
             self.open(path, &ctx);
         }
+        if let Some(rx) = &self.update_check
+            && let Ok(found) = rx.try_recv()
+        {
+            self.update_check = None;
+            match found {
+                Ok(Some(newer)) => {
+                    self.update = Some(newer);
+                    self.update_at = now;
+                    self.update_note = None;
+                }
+                Ok(None) => self.update_note = Some("You have the newest version.".into()),
+                Err(e) => self.update_note = Some(e),
+            }
+        }
+        if let Some(rx) = &self.update_job
+            && let Ok(setup) = rx.try_recv()
+        {
+            self.update_job = None;
+            // The setup waits for GigEyes to close, installs, and opens the new version.
+            match setup.and_then(|setup| update::run_as_admin(&setup, "--update")) {
+                Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+                Err(e) => self.update_note = Some(e),
+            }
+        }
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let has_result = matches!(self.state, State::Done(..));
+        if (self.screen, has_result) != self.shown {
+            self.shown = (self.screen, has_result);
+            self.shown_at = now;
+        }
         let reveal = ((now - self.revealed_at) / REVEAL_SECS).clamp(0.0, 1.0) as f32;
         if has_result && reveal < 1.0 {
             ctx.request_repaint();
@@ -717,18 +869,41 @@ impl eframe::App for App {
                     .show(ui, |ui| {
                         column(ui, side, width, |ui| {
                             ui.add_space(4.0);
-                            match self.screen {
+                            self.update_banner(ui, &ctx);
+                            let since = self.shown_at;
+                            enter(ui, since, |ui| match self.screen {
                                 Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
                                 Screen::Rig => self.rig_view(ui),
                                 Screen::Settings => self.settings_view(ui, &ctx),
-                            }
+                            });
                             ui.add_space(32.0);
                         });
                     });
             });
 
-        if hovering {
-            drop_overlay(&ctx);
+        let drop = ctx.animate_bool_with_time(egui::Id::NULL.with("drop"), hovering, secs(0.15));
+        if drop > 0.0 {
+            drop_overlay(&ctx, drop);
+        }
+        // Light and dark mode crossfade instead of flashing: the old background fades off the new one.
+        if let Some((old, since)) = self.theme_fade {
+            let length = secs(0.35);
+            let t = if length > 0.0 {
+                ((now - since) as f32 / length).min(1.0)
+            } else {
+                1.0
+            };
+            if t >= 1.0 {
+                self.theme_fade = None;
+            } else {
+                let fade = 1.0 - egui::emath::easing::cubic_out(t);
+                ctx.layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::NULL.with("theme-fade"),
+                ))
+                .rect_filled(ctx.content_rect(), 0.0, old.gamma_multiply(fade));
+                ctx.request_repaint();
+            }
         }
     }
 }
@@ -764,15 +939,16 @@ fn header(ui: &mut egui::Ui, screen: &mut Screen) {
             ui.label(RichText::new("Hear a tone. See where the knobs sit.").weak());
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            for (target, label) in [
-                (Screen::Settings, "Settings"),
-                (Screen::Rig, "Your rig"),
-                (Screen::Tone, "Tone"),
-            ] {
-                if ui.selectable_label(*screen == target, label).clicked() {
-                    *screen = target;
-                }
-            }
+            segmented(
+                ui,
+                "screens",
+                screen,
+                &[
+                    (Screen::Tone, "Tone"),
+                    (Screen::Rig, "Your rig"),
+                    (Screen::Settings, "Settings"),
+                ],
+            );
         });
     });
 }
@@ -1095,17 +1271,18 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
 }
 
 /// While a file is dragged over the window: dim everything and say what will happen.
-fn drop_overlay(ctx: &egui::Context) {
+/// `shown` runs 0 to 1 as the overlay fades in.
+fn drop_overlay(ctx: &egui::Context, shown: f32) {
     let rect = ctx.content_rect();
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         egui::Id::NULL.with("drop_overlay"),
     ));
-    painter.rect_filled(rect, 0.0, Color32::from_black_alpha(170));
+    painter.rect_filled(rect, 0.0, Color32::from_black_alpha((170.0 * shown) as u8));
     painter.rect_stroke(
         rect.shrink(12.0),
         CornerRadius::same(RADIUS * 2),
-        Stroke::new(2.0, accent()),
+        Stroke::new(2.0, accent().gamma_multiply(shown)),
         StrokeKind::Inside,
     );
     painter.text(
@@ -1113,6 +1290,6 @@ fn drop_overlay(ctx: &egui::Context) {
         Align2::CENTER_CENTER,
         "Drop it. GigEyes is listening.",
         FontId::new(24.0, FontFamily::Name("semibold".into())),
-        ink(),
+        Color32::WHITE.gamma_multiply(shown),
     );
 }

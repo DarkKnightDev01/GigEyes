@@ -5,6 +5,7 @@
 //!
 //! `GigEyes-Setup.exe`                         the window
 //! `GigEyes-Setup.exe --silent [--dir <path>]`  install with defaults, no window (used by the build to test it)
+//! `GigEyes-Setup.exe --update`                install over the current version, then reopen GigEyes (the app's updater)
 //! `uninstall.exe --uninstall [--silent]`       remove (Windows' Installed apps runs this)
 //! `gigeyes-setup --pack <out> <files…>`        build a setup by appending files to this program
 
@@ -12,6 +13,7 @@
 mod hardware;
 mod install;
 #[path = "../../gigeyes/src/look.rs"]
+#[allow(dead_code)] // shared with the app, which uses the tabs and springs
 mod look;
 #[path = "../../gigeyes/src/model.rs"]
 mod model;
@@ -50,6 +52,7 @@ fn main() {
     }
 
     let uninstalling = flag("--uninstall");
+    let updating = flag("--update");
     // Both install and removal target the recorded install. Removal falls back to the program's own
     // folder only when that folder really is an install (it holds the uninstaller), so a stray
     // `GigEyes-Setup.exe --uninstall` in Downloads can't delete files that happen to share a name.
@@ -98,6 +101,8 @@ fn main() {
         viewport: egui::ViewportBuilder::default()
             .with_title(if uninstalling {
                 "Remove GigEyes"
+            } else if updating {
+                "Updating GigEyes"
             } else {
                 "GigEyes Setup"
             })
@@ -106,7 +111,7 @@ fn main() {
         ..Default::default()
     };
     // The local AI this PC can run, unless it's already downloaded. Silent installs never download it.
-    let ai = if uninstalling {
+    let ai = if uninstalling || updating {
         None
     } else {
         hardware::choose(&hardware::detect())
@@ -120,11 +125,22 @@ fn main() {
         cancel: Arc::new(AtomicBool::new(false)),
         me,
         uninstalling,
-        opts: Options {
-            dir,
-            start_menu: true,
-            desktop: false,
+        updating,
+        opts: {
+            // An update keeps the shortcuts the way the user left them.
+            let (start_menu, desktop) = if updating {
+                install::shortcuts()
+            } else {
+                (true, false)
+            };
+            Options {
+                dir,
+                start_menu,
+                desktop,
+            }
         },
+        phase_key: None,
+        phase_at: 0.0,
         open_after: true,
         remove_data: false,
         previous: install::existing().map(|(_, version)| version),
@@ -164,6 +180,11 @@ enum Message {
 struct Setup {
     me: PathBuf,
     uninstalling: bool,
+    /// Started by the app's updater: install straight away, then reopen GigEyes.
+    updating: bool,
+    /// Which phase is showing and since when, for its entrance.
+    phase_key: Option<std::mem::Discriminant<Phase>>,
+    phase_at: f64,
     opts: Options,
     open_after: bool,
     remove_data: bool,
@@ -182,11 +203,12 @@ struct Setup {
 impl Setup {
     fn start(&mut self, ctx: &egui::Context) {
         let (tx, rx) = mpsc::channel();
-        let (me, opts, remove_data, uninstalling, ctx) = (
+        let (me, opts, remove_data, uninstalling, updating, ctx) = (
             self.me.clone(),
             self.opts.clone(),
             self.remove_data,
             self.uninstalling,
+            self.updating,
             ctx.clone(),
         );
         let ai = self.ai.filter(|_| self.get_ai && !uninstalling);
@@ -199,11 +221,22 @@ impl Setup {
             let result = if uninstalling {
                 install::uninstall(&opts.dir, remove_data).map(|()| None)
             } else {
-                install::install(&me, &opts, |step| {
-                    let _ = tx.send(Message::Step(step.to_string()));
-                    ctx.request_repaint();
-                })
-                .map(|()| {
+                let attempt = || {
+                    install::install(&me, &opts, |step| {
+                        let _ = tx.send(Message::Step(step.to_string()));
+                        ctx.request_repaint();
+                    })
+                };
+                let mut result = attempt();
+                // The updater starts us while GigEyes is still closing: give it up to 10 s to let go.
+                for _ in 0..40 {
+                    if !(updating && result.as_ref().is_err_and(|e| e.contains("in use"))) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    result = attempt();
+                }
+                result.map(|()| {
                     let model = ai?;
                     let _ = tx.send(Message::Bytes(0));
                     let mut shown = 0;
@@ -241,6 +274,11 @@ impl eframe::App for Setup {
                 Message::Finished(result) => {
                     self.work = None;
                     self.phase = match result {
+                        Ok(_) if self.updating => {
+                            install::launch(&self.opts.dir);
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            Phase::Done
+                        }
                         Ok(note) => {
                             self.ai_note = note;
                             Phase::Done
@@ -249,6 +287,15 @@ impl eframe::App for Setup {
                     };
                 }
             }
+        }
+
+        if self.updating && matches!(self.phase, Phase::Ready) {
+            self.start(&ctx);
+        }
+        let key = std::mem::discriminant(&self.phase);
+        if self.phase_key != Some(key) {
+            self.phase_key = Some(key);
+            self.phase_at = ctx.input(|i| i.time);
         }
 
         egui::CentralPanel::default()
@@ -262,18 +309,25 @@ impl eframe::App for Setup {
                     ui.label(RichText::new("Hear a tone. See where the knobs sit.").weak());
                 });
                 ui.add_space(32.0);
-                match &self.phase {
+                let since = self.phase_at;
+                enter(ui, since, |ui| match &self.phase {
                     Phase::Ready if self.uninstalling => self.confirm_removal(ui, &ctx),
                     Phase::Ready => self.choose(ui, &ctx),
                     Phase::Working(done, total, now) => {
                         let label = if self.uninstalling {
                             "Removing GigEyes…"
+                        } else if self.updating && now.is_empty() {
+                            "Updating GigEyes…"
                         } else {
                             now.as_str()
                         };
                         ui.label(semibold(label, 16.0));
                         ui.add_space(12.0);
-                        let fraction = (*done as f32 / *total as f32).clamp(0.05, 1.0);
+                        let fraction = ctx.animate_value_with_time(
+                            egui::Id::NULL.with("install-bar"),
+                            (*done as f32 / *total as f32).clamp(0.05, 1.0),
+                            secs(0.3),
+                        );
                         ui.add(
                             egui::ProgressBar::new(fraction)
                                 .fill(accent())
@@ -288,7 +342,11 @@ impl eframe::App for Setup {
                         ui.label(semibold(format!("Downloading {}…", model.name), 16.0));
                         ui.add_space(12.0);
                         ui.add(
-                            egui::ProgressBar::new(*done as f32 / model.bytes as f32)
+                            egui::ProgressBar::new(ctx.animate_value_with_time(
+                                egui::Id::NULL.with("ai-bar"),
+                                *done as f32 / model.bytes as f32,
+                                secs(0.3),
+                            ))
                                 .fill(accent())
                                 .desired_height(8.0)
                                 .corner_radius(4),
@@ -321,7 +379,7 @@ impl eframe::App for Setup {
                             self.phase = Phase::Ready;
                         }
                     }
-                }
+                });
             });
     }
 }
@@ -370,7 +428,7 @@ impl Setup {
         });
         ui.add_space(10.0);
         ui.label(
-            RichText::new("For your Windows account only: no admin rights, nothing else on the PC is changed.")
+            RichText::new("Installs in Program Files for everyone on this PC, so Windows asks for permission first. Your rig and settings stay in your own account.")
                 .size(13.0)
                 .weak(),
         );

@@ -1,4 +1,5 @@
-//! Installing and removing GigEyes for the current user: no admin rights, nothing outside the user's own folders.
+//! Installing and removing GigEyes for everyone on the PC, in Program Files. The setup runs as administrator
+//! (its manifest asks Windows for that); each user's own data stays in their AppData.
 
 use crate::payload;
 use std::path::{Path, PathBuf};
@@ -6,14 +7,14 @@ use std::path::{Path, PathBuf};
 pub const APP: &str = "GigEyes";
 pub const VERSION: &str = crate::look::VERSION;
 const UNINSTALLER: &str = "uninstall.exe";
-/// Windows' list of installed apps, for this user only.
+/// Windows' list of installed apps (machine-wide now; per-user before 0.4.1).
 #[cfg(windows)]
 const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes";
 
 pub fn default_dir() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(std::env::temp_dir)
-        .join("Programs")
+    std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| r"C:\Program Files".into())
         .join(APP)
 }
 
@@ -39,8 +40,8 @@ pub struct Options {
 /// An earlier install, from Windows' installed-apps list: its folder and version.
 #[cfg(windows)]
 pub fn existing() -> Option<(PathBuf, String)> {
-    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
-    let key = RegKey::predef(HKEY_CURRENT_USER)
+    use winreg::{RegKey, enums::HKEY_LOCAL_MACHINE};
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
         .open_subkey(UNINSTALL_KEY)
         .ok()?;
     let dir: String = key.get_value("InstallLocation").ok()?;
@@ -84,6 +85,7 @@ pub fn install(setup: &Path, opts: &Options, mut step: impl FnMut(&str)) -> Resu
 
     step("Adding shortcuts…");
     system::add(opts, entries.iter().map(|e| e.len).sum::<u64>() + stub_len)?;
+    system::remove_old_per_user_install(&opts.dir);
     Ok(())
 }
 
@@ -113,27 +115,74 @@ pub fn uninstall(dir: &Path, remove_data: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Start the installed app, detached from the setup.
+/// Start the installed app, detached from the setup. Through Explorer on Windows, so the app runs as
+/// the signed-in user and not as administrator: Windows blocks drag and drop into elevated windows.
 pub fn launch(dir: &Path) {
-    let _ = std::process::Command::new(dir.join("gigeyes.exe"))
-        .current_dir(dir)
-        .spawn();
+    let app = dir.join("gigeyes.exe");
+    let _ = if cfg!(windows) {
+        std::process::Command::new("explorer.exe").arg(app).spawn()
+    } else {
+        std::process::Command::new(app).current_dir(dir).spawn()
+    };
+}
+
+/// Which shortcuts exist now, so an update keeps the user's choice.
+pub fn shortcuts() -> (bool, bool) {
+    system::shortcuts()
 }
 
 #[cfg(windows)]
 mod system {
     use super::*;
-    use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    use winreg::{
+        RegKey,
+        enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE},
+    };
 
+    /// The shortcuts every user sees: the shared Start menu and the public desktop.
     fn start_menu_link() -> Option<PathBuf> {
-        dirs::data_dir().map(|d| {
-            d.join(r"Microsoft\Windows\Start Menu\Programs")
+        std::env::var_os("ProgramData").map(|d| {
+            PathBuf::from(d)
+                .join(r"Microsoft\Windows\Start Menu\Programs")
                 .join("GigEyes.lnk")
         })
     }
 
     fn desktop_link() -> Option<PathBuf> {
-        dirs::desktop_dir().map(|d| d.join("GigEyes.lnk"))
+        std::env::var_os("PUBLIC").map(|d| PathBuf::from(d).join(r"Desktop\GigEyes.lnk"))
+    }
+
+    pub fn shortcuts() -> (bool, bool) {
+        let exists = |link: Option<PathBuf>| link.is_some_and(|l| l.exists());
+        (exists(start_menu_link()), exists(desktop_link()))
+    }
+
+    /// Before 0.4.1 GigEyes installed per user under %LOCALAPPDATA%\Programs. Take that copy away once
+    /// the Program Files one is in place, so there's one GigEyes in the Start menu and Installed apps.
+    pub fn remove_old_per_user_install(new_dir: &Path) {
+        let user = RegKey::predef(HKEY_CURRENT_USER);
+        let Some(old) = user
+            .open_subkey(UNINSTALL_KEY)
+            .ok()
+            .and_then(|k| k.get_value::<String, _>("InstallLocation").ok())
+            .map(PathBuf::from)
+        else {
+            return;
+        };
+        if old != new_dir {
+            for name in ["gigeyes.exe", "yt-dlp.exe", UNINSTALLER] {
+                let _ = std::fs::remove_file(old.join(name));
+            }
+            let _ = std::fs::remove_dir(&old); // only if empty
+        }
+        let links = [
+            dirs::data_dir().map(|d| d.join(r"Microsoft\Windows\Start Menu\Programs\GigEyes.lnk")),
+            dirs::desktop_dir().map(|d| d.join("GigEyes.lnk")),
+        ];
+        for link in links.into_iter().flatten() {
+            let _ = std::fs::remove_file(link);
+        }
+        let _ = user.delete_subkey_all(UNINSTALL_KEY);
     }
 
     pub fn add(opts: &Options, bytes: u64) -> Result<(), String> {
@@ -155,7 +204,7 @@ mod system {
             }
         }
         let uninstall = format!("\"{}\" --uninstall", opts.dir.join(UNINSTALLER).display());
-        let (key, _) = RegKey::predef(HKEY_CURRENT_USER)
+        let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
             .create_subkey(UNINSTALL_KEY)
             .map_err(|e| format!("Couldn't add GigEyes to Installed apps: {e}"))?;
         let set = |name: &str, value: &str| key.set_value(name, &value.to_string());
@@ -175,7 +224,7 @@ mod system {
         for link in [start_menu_link(), desktop_link()].into_iter().flatten() {
             let _ = std::fs::remove_file(link);
         }
-        let _ = RegKey::predef(HKEY_CURRENT_USER).delete_subkey_all(UNINSTALL_KEY);
+        let _ = RegKey::predef(HKEY_LOCAL_MACHINE).delete_subkey_all(UNINSTALL_KEY);
     }
 
     /// A running program can't delete itself on Windows, so a hidden cmd does it a moment after we exit.
@@ -210,6 +259,12 @@ mod system {
     }
 
     pub fn remove() {}
+
+    pub fn shortcuts() -> (bool, bool) {
+        (true, false)
+    }
+
+    pub fn remove_old_per_user_install(_: &Path) {}
 
     pub fn remove_self_and_folder(dir: &Path) {
         let _ = std::fs::remove_file(dir.join(UNINSTALLER));

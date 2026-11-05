@@ -5,6 +5,7 @@ use eframe::egui::{
     Vec2,
 };
 use std::f32::consts::{FRAC_PI_2, TAU};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Amp black and tube amber, or warm paper for light mode: one accent on data and the main action.
@@ -58,7 +59,7 @@ pub fn error() -> Color32 {
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x14, 0x13, 0x11);
 pub const RADIUS: u8 = 8;
 /// The version people see. Four parts, Windows style; Cargo's own version only allows three.
-pub const VERSION: &str = "0.4.0.1";
+pub const VERSION: &str = "0.4.1";
 /// Barlow (SIL Open Font License, see fonts/OFL.txt), with egui's own fonts behind it for missing glyphs.
 pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
@@ -194,10 +195,16 @@ pub fn tick(ui: &mut egui::Ui, on: &mut bool, title: RichText, detail: Option<Ri
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, &name));
 
     let corner = CornerRadius::same(6);
-    if response.hovered() || response.has_focus() {
+    // The highlight eases in and out instead of blinking.
+    let lit = ui.ctx().animate_bool_with_time(
+        response.id,
+        response.hovered() || response.has_focus(),
+        secs(0.12),
+    );
+    if lit > 0.0 {
         ui.painter().set(
             backdrop,
-            Shape::rect_filled(area, corner, raised().gamma_multiply(0.7)),
+            Shape::rect_filled(area, corner, raised().gamma_multiply(0.7 * lit)),
         );
     }
     if response.has_focus() {
@@ -242,4 +249,164 @@ pub fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
             // Plain left-aligned flow: inside ui.columns text would otherwise be stretched to full width.
             ui.with_layout(Layout::top_down(Align::LEFT), add);
         });
+}
+
+// Motion, after Apple's fluid-interface rules: things start from where they are now (so any animation
+// can be interrupted), settle without bouncing, and stay out of the way when Windows animations are off.
+
+/// Windows' "Show animations in Windows" setting. Off means every animation jumps to its end.
+pub fn motion() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        #[cfg(windows)]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+                SystemParametersInfoW,
+            };
+            let mut on: i32 = 1;
+            // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL (an i32) to the pointer we pass.
+            unsafe {
+                SystemParametersInfoW(
+                    SPI_GETCLIENTAREAANIMATION,
+                    0,
+                    Some(&mut on as *mut i32 as *mut _),
+                    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+                )
+            }
+            .map_or(true, |()| on != 0)
+        }
+        #[cfg(not(windows))]
+        true
+    })
+}
+
+/// An animation length in seconds, or 0 when Windows animations are off.
+pub fn secs(seconds: f32) -> f32 {
+    if motion() { seconds } else { 0.0 }
+}
+
+/// Entrance for content that just appeared at `since` (egui time): fades in and settles up from 8 px
+/// below, 0.3 s ease-out. Only the drawing moves; clicks land where the content will be.
+pub fn enter<R>(ui: &mut egui::Ui, since: f64, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let length = secs(0.3);
+    let t = if length > 0.0 {
+        ((ui.input(|i| i.time) - since) as f32 / length).clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    if t < 1.0 {
+        ui.ctx().request_repaint();
+    }
+    let eased = egui::emath::easing::cubic_out(t);
+    ui.scope(|ui| {
+        ui.multiply_opacity(eased);
+        let lift = egui::emath::TSTransform::from_translation(Vec2::new(0.0, 8.0 * (1.0 - eased)));
+        ui.with_visual_transform(lift, add).inner
+    })
+    .inner
+}
+
+/// A critically damped spring toward `target` (Apple's default: damping 1.0, no overshoot), kept per
+/// `id` across frames. `response` is roughly how long it takes to get there, in seconds. A new target
+/// carries on from the current position and speed, so it never jumps. Returns the position now.
+pub fn spring(ctx: &egui::Context, id: egui::Id, target: f32, response: f32) -> f32 {
+    let (mut x, mut v) = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || (target, 0.0f32)));
+    if motion() {
+        let omega = TAU / response;
+        let dt = ctx.input(|i| i.stable_dt).min(1.0 / 20.0);
+        // Small steps keep the integration stable at low frame rates.
+        for _ in 0..4 {
+            let h = dt / 4.0;
+            v += (-omega * omega * (x - target) - 2.0 * omega * v) * h;
+            x += v * h;
+        }
+    }
+    if !motion() || ((x - target).abs() < 0.05 && v.abs() < 0.5) {
+        (x, v) = (target, 0.0);
+    } else {
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(id, (x, v)));
+    x
+}
+
+/// Tabs in a row with one pill behind the chosen tab that springs to the new one when it changes.
+/// Returns true when the choice changed.
+pub fn segmented<T: PartialEq + Copy>(
+    ui: &mut egui::Ui,
+    id: &str,
+    current: &mut T,
+    options: &[(T, &str)],
+) -> bool {
+    let id = egui::Id::NULL.with(id);
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let pad = Vec2::new(14.0, 7.0);
+    let galleys: Vec<_> = options
+        .iter()
+        .map(|(_, label)| {
+            ui.painter()
+                .layout_no_wrap(label.to_string(), font.clone(), ink())
+        })
+        .collect();
+    let gap = 4.0;
+    let height = galleys[0].size().y + 2.0 * pad.y;
+    let width: f32 = galleys
+        .iter()
+        .map(|g| g.size().x + 2.0 * pad.x)
+        .sum::<f32>()
+        + gap * (options.len() - 1) as f32;
+    let (row, _) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+
+    let mut x = row.left();
+    let mut changed = false;
+    let mut chosen = None;
+    let mut tabs = vec![];
+    for (i, ((value, label), galley)) in options.iter().zip(&galleys).enumerate() {
+        let rect = egui::Rect::from_min_size(
+            Pos2::new(x, row.top()),
+            Vec2::new(galley.size().x + 2.0 * pad.x, height),
+        );
+        x = rect.right() + gap;
+        let response = ui.interact(rect, id.with(i), Sense::click());
+        let selected = *value == *current;
+        response
+            .widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, *label));
+        if response.clicked() && !selected {
+            *current = *value;
+            changed = true;
+        }
+        if *value == *current {
+            chosen = Some(rect);
+        }
+        tabs.push((rect, response, *value));
+    }
+
+    if let Some(target) = chosen {
+        let left = spring(ui.ctx(), id.with("left"), target.left(), 0.35);
+        let right = spring(ui.ctx(), id.with("right"), target.right(), 0.35);
+        let pill = egui::Rect::from_x_y_ranges(left..=right, row.y_range());
+        ui.painter()
+            .rect_filled(pill, CornerRadius::same(6), ui.visuals().selection.bg_fill);
+    }
+    for ((rect, response, value), galley) in tabs.into_iter().zip(galleys) {
+        let on = value == *current;
+        let colour = if on || response.hovered() {
+            ink()
+        } else {
+            muted()
+        };
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(6),
+                Stroke::new(1.0, muted()),
+                egui::StrokeKind::Inside,
+            );
+        }
+        let at = rect.center() - galley.size() / 2.0;
+        ui.painter()
+            .galley_with_override_text_color(at, galley, colour);
+    }
+    changed
 }
