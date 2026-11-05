@@ -9,7 +9,8 @@ Pre-alpha. What works today:
 - **Tone analysis:** drop in a song, an isolated guitar track or a video link. GigEyes sums the tone up in one line, shows where an amp's Gain, Bass, Middle, Treble and Presence knobs would sit, and draws the EQ curve.
 - **Your rig:** GigEyes finds the VST3 plugins on your PC (it reads their names from disk and never loads them) and you tick the ones you play through.
 - **Song research:** with your own free search key, GigEyes finds interviews, rig rundowns and gear lists for the song, each linked so you can check it, and saves them so they open offline later.
-- **Local AI choice:** GigEyes reads your graphics card and memory and picks the biggest local model that still leaves room for Gig Performer.
+- **Local AI choice:** GigEyes reads your graphics card and memory and picks the biggest local model that still leaves room for Gig Performer. The setup offers to download it (untick to skip).
+- **Settings:** light or dark mode, your search key, the local AI, and **Remove all GigEyes files**.
 
 Coming next, in order:
 
@@ -29,7 +30,9 @@ Windows 10 or 11.
 2. Run it. If Windows shows "Windows protected your PC", click **More info → Run anyway**: the setup isn't code-signed yet.
 3. Click **Install GigEyes**. It installs for your Windows account only, with no admin prompt, into `%LOCALAPPDATA%\Programs\GigEyes`.
 
-To update, run a newer setup: your rig, research and search key stay. To remove GigEyes, use **Settings → Apps → Installed apps → GigEyes → Uninstall**. It removes only what GigEyes put there.
+The setup also offers to download the local AI picked for your PC (Qwen3 8B is 5 GB on an 8 GB graphics card). Untick **Download the local AI** to skip it, or click **Skip the AI download** while it runs; the app is installed either way.
+
+To update, run a newer setup: your rig, research and search key stay. To remove GigEyes, use **Settings → Remove all GigEyes files** inside the app (deletes your data and the AI, then opens the uninstaller), or **Windows Settings → Apps → Installed apps → GigEyes → Uninstall**. Both remove only what GigEyes put there.
 
 Builds of every push, between releases, are under **Actions → Windows build → a run → Artifacts**.
 
@@ -46,7 +49,7 @@ Or paste a link (YouTube and [most other video sites](https://github.com/yt-dlp/
 ### Song research
 
 1. Get a free key at [app.tavily.com](https://app.tavily.com/): 1,000 searches a month, no card needed.
-2. In GigEyes open **Your rig**, paste the key under **Song research** and click **Save key**.
+2. In GigEyes open **Settings**, paste the key under **Song research** and click **Save key**.
 3. After reading a song, check the artist and title under **Research this song** and click **Find sources**.
 
 The key is stored in `%APPDATA%\GigEyes\settings.json` on your PC and sent only to Tavily.

@@ -158,7 +158,8 @@ fn search_at(base: &str, key: &str, song: &str) -> Result<Research, String> {
     })
 }
 
-fn data_dir() -> Option<PathBuf> {
+/// `%APPDATA%\GigEyes`: rig, research and settings.
+pub fn data_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("GigEyes"))
 }
 
@@ -212,32 +213,32 @@ pub fn save(research: &Research) -> Result<(), String> {
         .map_err(|e| format!("Couldn't save the research: {e}"))
 }
 
+/// `settings.json`. Missing fields read as their defaults, so older files still load.
+/// shortcut: the Tavily key is plain text in the user's own AppData; move it to Windows Credential Manager before wider release.
 #[derive(Serialize, Deserialize, Default)]
-struct Settings {
-    tavily_key: String,
+#[serde(default)]
+pub struct Settings {
+    pub tavily_key: String,
+    pub light: bool,
 }
 
-/// The saved Tavily key, if any.
-/// shortcut: stored as plain text in the user's own AppData; move to Windows Credential Manager before wider release.
-pub fn load_key() -> Option<String> {
-    let text = std::fs::read_to_string(data_dir()?.join("settings.json")).ok()?;
-    let key = serde_json::from_str::<Settings>(&text).ok()?.tavily_key;
-    (!key.trim().is_empty()).then_some(key)
+pub fn load_settings() -> Settings {
+    data_dir()
+        .and_then(|dir| std::fs::read_to_string(dir.join("settings.json")).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
 }
 
-pub fn save_key(key: &str) -> Result<(), String> {
+pub fn save_settings(settings: &Settings) -> Result<(), String> {
     let dir = data_dir().ok_or("Can't find a settings folder on this PC.")?;
-    let settings = Settings {
-        tavily_key: key.trim().to_string(),
-    };
     std::fs::create_dir_all(&dir)
         .and_then(|_| {
             write_atomic(
                 &dir.join("settings.json"),
-                &serde_json::to_string_pretty(&settings).expect("serialises"),
+                &serde_json::to_string_pretty(settings).expect("serialises"),
             )
         })
-        .map_err(|e| format!("Couldn't save the key: {e}"))
+        .map_err(|e| format!("Couldn't save the settings: {e}"))
 }
 
 #[cfg(test)]

@@ -8,15 +8,21 @@
 //! `uninstall.exe --uninstall [--silent]`       remove (Windows' Installed apps runs this)
 //! `gigeyes-setup --pack <out> <files…>`        build a setup by appending files to this program
 
+#[path = "../../gigeyes/src/hardware.rs"]
+mod hardware;
 mod install;
 #[path = "../../gigeyes/src/look.rs"]
 mod look;
+#[path = "../../gigeyes/src/model.rs"]
+mod model;
 mod payload;
 
 use eframe::egui::{self, Align, Layout, RichText, Vec2};
 use install::Options;
 use look::*;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 
 fn main() {
@@ -95,11 +101,23 @@ fn main() {
             } else {
                 "GigEyes Setup"
             })
-            .with_inner_size([500.0, 600.0])
+            .with_inner_size([500.0, 650.0])
             .with_resizable(false),
         ..Default::default()
     };
+    // The local AI this PC can run, unless it's already downloaded. Silent installs never download it.
+    let ai = if uninstalling {
+        None
+    } else {
+        hardware::choose(&hardware::detect())
+            .model
+            .filter(|m| !model::is_downloaded(m))
+    };
     let app = Setup {
+        get_ai: ai.is_some(),
+        ai,
+        ai_note: None,
+        cancel: Arc::new(AtomicBool::new(false)),
         me,
         uninstalling,
         opts: Options {
@@ -130,13 +148,17 @@ enum Phase {
     Ready,
     /// (steps finished, steps in all, what's happening now)
     Working(usize, usize, String),
+    /// Bytes of the local AI downloaded so far.
+    Downloading(u64),
     Done,
     Failed(String),
 }
 
 enum Message {
     Step(String),
-    Finished(Result<(), String>),
+    Bytes(u64),
+    /// Ok carries why the local AI wasn't downloaded, if it wasn't: the install itself still worked.
+    Finished(Result<Option<String>, String>),
 }
 
 struct Setup {
@@ -145,6 +167,11 @@ struct Setup {
     opts: Options,
     open_after: bool,
     remove_data: bool,
+    /// The model picked for this PC (None when it doesn't fit or is already there), and whether to get it.
+    ai: Option<hardware::Model>,
+    get_ai: bool,
+    ai_note: Option<String>,
+    cancel: Arc<AtomicBool>,
     /// The version already installed, if any: the button then says Update.
     previous: Option<String>,
     size_mb: Option<f32>,
@@ -162,17 +189,33 @@ impl Setup {
             self.uninstalling,
             ctx.clone(),
         );
+        let ai = self.ai.filter(|_| self.get_ai && !uninstalling);
+        let cancel = self.cancel.clone();
         let total = payload::read(&me)
             .ok()
             .flatten()
             .map_or(1, |(entries, _)| entries.len() + 2);
         std::thread::spawn(move || {
             let result = if uninstalling {
-                install::uninstall(&opts.dir, remove_data)
+                install::uninstall(&opts.dir, remove_data).map(|()| None)
             } else {
                 install::install(&me, &opts, |step| {
                     let _ = tx.send(Message::Step(step.to_string()));
                     ctx.request_repaint();
+                })
+                .map(|()| {
+                    let model = ai?;
+                    let _ = tx.send(Message::Bytes(0));
+                    let mut shown = 0;
+                    model::download(&model, &cancel, |done| {
+                        // A repaint every 8 MB is plenty for a bar gigabytes long.
+                        if done - shown >= 8 << 20 {
+                            shown = done;
+                            let _ = tx.send(Message::Bytes(done));
+                            ctx.request_repaint();
+                        }
+                    })
+                    .err()
                 })
             };
             let _ = tx.send(Message::Finished(result));
@@ -194,10 +237,14 @@ impl eframe::App for Setup {
                         *now = step;
                     }
                 }
+                Message::Bytes(done) => self.phase = Phase::Downloading(done),
                 Message::Finished(result) => {
                     self.work = None;
                     self.phase = match result {
-                        Ok(()) => Phase::Done,
+                        Ok(note) => {
+                            self.ai_note = note;
+                            Phase::Done
+                        }
                         Err(e) => Phase::Failed(e),
                     };
                 }
@@ -229,11 +276,37 @@ impl eframe::App for Setup {
                         let fraction = (*done as f32 / *total as f32).clamp(0.05, 1.0);
                         ui.add(
                             egui::ProgressBar::new(fraction)
-                                .fill(ACCENT)
+                                .fill(accent())
                                 .desired_height(8.0)
                                 .corner_radius(4),
                         );
                         ctx.request_repaint();
+                    }
+                    Phase::Downloading(done) => {
+                        let model = self.ai.expect("downloading a model");
+                        let gb = |bytes: u64| bytes as f32 / 1e9;
+                        ui.label(semibold(format!("Downloading {}…", model.name), 16.0));
+                        ui.add_space(12.0);
+                        ui.add(
+                            egui::ProgressBar::new(*done as f32 / model.bytes as f32)
+                                .fill(accent())
+                                .desired_height(8.0)
+                                .corner_radius(4),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.1} of {:.1} GB. GigEyes is installed already; this is the local AI.",
+                                gb(*done),
+                                gb(model.bytes)
+                            ))
+                            .size(13.0)
+                            .weak(),
+                        );
+                        ui.add_space(18.0);
+                        if wide_button(ui, "Skip the AI download", false).clicked() {
+                            self.cancel.store(true, Ordering::Relaxed);
+                        }
                     }
                     Phase::Done => self.finished(ui, &ctx),
                     Phase::Failed(e) => {
@@ -278,6 +351,21 @@ impl Setup {
             ] {
                 tick(ui, on, RichText::new(text), None);
                 ui.add_space(6.0);
+            }
+            if let Some(model) = &self.ai {
+                tick(
+                    ui,
+                    &mut self.get_ai,
+                    RichText::new("Download the local AI"),
+                    Some(
+                        RichText::new(format!(
+                            "{}, {:.1} GB, picked for this PC. Untick to skip it.",
+                            model.name, model.size_gb
+                        ))
+                        .size(13.0)
+                        .weak(),
+                    ),
+                );
             }
         });
         ui.add_space(10.0);
@@ -329,7 +417,9 @@ impl Setup {
             tick(
                 ui,
                 &mut self.remove_data,
-                RichText::new("Also delete my rig, saved research and search key"),
+                RichText::new(
+                    "Also delete my rig, saved research, search key and the downloaded AI",
+                ),
                 None,
             );
         });
@@ -350,6 +440,15 @@ impl Setup {
             ui.label(semibold(line, 22.0));
             if !self.uninstalling && self.opts.start_menu {
                 ui.label(RichText::new("You'll find it in the Start menu.").weak());
+            }
+            if let Some(note) = &self.ai_note {
+                let why = if note == "Skipped." {
+                    "The local AI wasn't downloaded. Run this setup again to get it.".to_string()
+                } else {
+                    format!("The local AI wasn't downloaded: {note} Run this setup again to retry.")
+                };
+                ui.add_space(8.0);
+                ui.label(RichText::new(why).size(13.0).weak());
             }
         });
         ui.add_space(28.0);
@@ -376,13 +475,13 @@ impl Setup {
 /// A full-width button, 44px tall, label centred: amber for the main action, neutral otherwise.
 fn wide_button(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     let label = if primary {
-        semibold(text, 16.0).color(GROUND)
+        semibold(text, 16.0).color(ON_ACCENT)
     } else {
         semibold(text, 16.0)
     };
     let mut button = egui::Button::new(label).min_size(Vec2::new(0.0, 44.0));
     if primary {
-        button = button.fill(ACCENT);
+        button = button.fill(accent());
     }
     // A justified layout stretches the button to the full width and centres its text.
     ui.with_layout(Layout::top_down_justified(Align::Center), |ui| {

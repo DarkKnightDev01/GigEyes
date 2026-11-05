@@ -4,6 +4,10 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
+**New in 0.4.0.1**
+- **Settings** tab: light or dark mode, your search key, the local AI, and **Remove all GigEyes files** (deletes your rig, research, key, settings and the downloaded AI, then opens the uninstaller).
+- The setup can download the local AI picked for your PC, checked against Hugging Face's published checksum. Untick **Download the local AI** to skip it, or skip it while it downloads.
+
 **What it does now**
 - **Tone reading:** drop in a song, an isolated guitar track or a video, or paste a YouTube or other video link. GigEyes sums the tone up in one line, turns an amp's Gain, Bass, Middle, Treble and Presence knobs to where the recording sits, and draws its EQ curve. Downloads from links are deleted right after reading.
 - **Your rig:** GigEyes finds the VST3 plugins on your PC (it only reads their names, it never loads them) and you tick the ones you play through.
@@ -15,4 +19,5 @@ Windows may say "Windows protected your PC" because the setup isn't code-signed 
 - The knob positions are rough starting points on an amp with its EQ flat at noon.
 - The Gain reading is a rough guess and can call a compressed track clean.
 - webm and opus files don't open yet (links work).
+- The downloaded AI isn't used yet; AI reading comes next.
 - Your search key is saved as plain text in `%APPDATA%\GigEyes\settings.json`.

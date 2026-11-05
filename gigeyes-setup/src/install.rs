@@ -4,7 +4,7 @@ use crate::payload;
 use std::path::{Path, PathBuf};
 
 pub const APP: &str = "GigEyes";
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+pub const VERSION: &str = crate::look::VERSION;
 const UNINSTALLER: &str = "uninstall.exe";
 /// Windows' list of installed apps, for this user only.
 #[cfg(windows)]
@@ -99,8 +99,15 @@ pub fn uninstall(dir: &Path, remove_data: bool) -> Result<(), String> {
         }
     }
     system::remove();
-    if remove_data && let Some(data) = dirs::config_dir().map(|d| d.join(APP)) {
-        let _ = std::fs::remove_dir_all(data);
+    if remove_data {
+        // %APPDATA%\GigEyes (rig, research, key) and %LOCALAPPDATA%\GigEyes (the AI model).
+        for data in [dirs::config_dir(), dirs::data_local_dir()]
+            .into_iter()
+            .flatten()
+            .map(|d| d.join(APP))
+        {
+            let _ = std::fs::remove_dir_all(data);
+        }
     }
     system::remove_self_and_folder(dir);
     Ok(())

@@ -7,7 +7,10 @@ edition.workspace = true
 dirs = "7.0.0"
 eframe = "0.37.0"
 rfd = "0.17.2"
+sha2 = "0.11.1"
+ureq = "3.5.1"
 
 [target."cfg(windows)".dependencies]
 mslnk = "0.1.8"
+windows = { version = "0.62.2", features = ["Win32_Graphics_Dxgi", "Win32_System_SystemInformation", "Win32_Foundation"] }
 winreg = "0.56.0"

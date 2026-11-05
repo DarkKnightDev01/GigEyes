@@ -41,6 +41,9 @@ pub struct Model {
     pub file: &'static str,
     /// Download size of the file.
     pub size_gb: f32,
+    /// Exact size and SHA-256 of the file, from Hugging Face, to check the download.
+    pub bytes: u64,
+    pub sha256: &'static str,
 }
 
 // Sizes from Hugging Face's file listing. Room for the context (~1 GB) is added when choosing.
@@ -49,24 +52,32 @@ pub const QWEN3_14B: Model = Model {
     repo: "Qwen/Qwen3-14B-GGUF",
     file: "Qwen3-14B-Q4_K_M.gguf",
     size_gb: 9.00,
+    bytes: 9001752960,
+    sha256: "500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0",
 };
 pub const QWEN3_8B: Model = Model {
     name: "Qwen3 8B",
     repo: "Qwen/Qwen3-8B-GGUF",
     file: "Qwen3-8B-Q4_K_M.gguf",
     size_gb: 5.03,
+    bytes: 5027783488,
+    sha256: "d98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785",
 };
 pub const QWEN3_4B: Model = Model {
     name: "Qwen3 4B",
     repo: "Qwen/Qwen3-4B-GGUF",
     file: "Qwen3-4B-Q4_K_M.gguf",
     size_gb: 2.50,
+    bytes: 2497280256,
+    sha256: "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
 };
 pub const QWEN3_1_7B: Model = Model {
     name: "Qwen3 1.7B",
     repo: "Qwen/Qwen3-1.7B-GGUF",
     file: "Qwen3-1.7B-Q8_0.gguf",
     size_gb: 1.83,
+    bytes: 1834426016,
+    sha256: "061b54daade076b5d3362dac252678d17da8c68f07560be70818cace6590cb1a",
 };
 
 /// Memory a model needs on top of its file: the context window and runtime buffers.

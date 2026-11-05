@@ -6,6 +6,7 @@ mod decode;
 mod fetch;
 mod hardware;
 mod look;
+mod model;
 mod research;
 mod rig;
 
@@ -48,11 +49,11 @@ fn main() -> eframe::Result {
         Box::new(|cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             cc.egui_ctx.set_fonts(fonts());
-            cc.egui_ctx.set_theme(egui::Theme::Dark);
-            cc.egui_ctx.style_mut_of(egui::Theme::Dark, theme);
+            let settings = research::load_settings();
+            apply_theme(&cc.egui_ctx, settings.light);
             let mut app = App {
                 rig: rig::load(),
-                tavily_key: research::load_key().unwrap_or_default(),
+                tavily_key: settings.tavily_key,
                 ..App::default()
             };
             if let Some(path) = initial {
@@ -94,6 +95,9 @@ struct App {
     research_note: Option<String>,
     tavily_key: String,
     key_note: Option<String>,
+    /// "Remove all files" asks once more before deleting.
+    confirm_remove: bool,
+    remove_note: Option<String>,
     /// Read once, the first time the rig screen opens.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
 }
@@ -103,6 +107,7 @@ enum Screen {
     #[default]
     Tone,
     Rig,
+    Settings,
 }
 
 fn file_name(path: &std::path::Path) -> String {
@@ -224,7 +229,7 @@ impl App {
             }
             State::Failed(e) => card(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    ui.add(icon(ICON_ALERT, 20.0, ERROR));
+                    ui.add(icon(ICON_ALERT, 20.0, error()));
                     ui.label(e);
                 });
                 ui.label(RichText::new("Try another file or link.").weak());
@@ -250,8 +255,8 @@ impl App {
             if self.tavily_key.trim().is_empty() {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new("Research needs a free Tavily key.").weak());
-                    if ui.link("Add it in Your rig").clicked() {
-                        self.screen = Screen::Rig;
+                    if ui.link("Add it in Settings").clicked() {
+                        self.screen = Screen::Settings;
                     }
                 });
                 return;
@@ -297,7 +302,7 @@ impl App {
             }
             if let Some(note) = &self.research_note {
                 ui.add_space(8.0);
-                ui.colored_label(ERROR, note);
+                ui.colored_label(error(), note);
             }
             if let Some(found) = &self.research {
                 ui.add_space(12.0);
@@ -320,7 +325,7 @@ impl App {
                         .nth(2)
                         .unwrap_or_default()
                         .trim_start_matches("www.");
-                    ui.hyperlink_to(semibold(&source.title, 15.0).color(INK), &source.url);
+                    ui.hyperlink_to(semibold(&source.title, 15.0).color(ink()), &source.url);
                     ui.label(RichText::new(domain).size(12.0).weak());
                     ui.label(RichText::new(snippet(&source.snippet)).size(13.0));
                 }
@@ -343,8 +348,8 @@ impl App {
         ui.add_space(16.0);
         let mut changed = false;
         ui.horizontal(|ui| {
-            let scan =
-                egui::Button::new(semibold("Scan for plugins", 15.0).color(GROUND)).fill(ACCENT);
+            let scan = egui::Button::new(semibold("Scan for plugins", 15.0).color(ON_ACCENT))
+                .fill(accent());
             if ui.add(scan).clicked() {
                 let previous = self.rig.clone().unwrap_or_default();
                 self.rig = Some(rig::rescan(&previous, &rig::default_folders()));
@@ -431,10 +436,32 @@ impl App {
         }
         if let Some(e) = &self.rig_error {
             ui.add_space(10.0);
-            ui.colored_label(ERROR, e);
+            ui.colored_label(error(), e);
         }
+    }
 
-        ui.add_space(24.0);
+    fn settings_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(semibold("Settings", 22.0));
+        ui.add_space(16.0);
+        card(ui, |ui| {
+            ui.label(semibold("Appearance", 17.0));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let light = ctx.theme() == egui::Theme::Light;
+                for (pick_light, label) in [(false, "Dark"), (true, "Light")] {
+                    if ui.selectable_label(light == pick_light, label).clicked()
+                        && light != pick_light
+                    {
+                        apply_theme(ctx, pick_light);
+                        let mut settings = research::load_settings();
+                        settings.light = pick_light;
+                        self.key_note = research::save_settings(&settings).err();
+                    }
+                }
+            });
+        });
+
+        ui.add_space(14.0);
         card(ui, |ui| {
             ui.label(semibold("Song research", 17.0));
             ui.label(
@@ -452,7 +479,9 @@ impl App {
                 let enter =
                     ui.add(field).lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if ui.button("Save key").clicked() || enter {
-                    self.key_note = Some(match research::save_key(&self.tavily_key) {
+                    let mut settings = research::load_settings();
+                    settings.tavily_key = self.tavily_key.trim().to_string();
+                    self.key_note = Some(match research::save_settings(&settings) {
                         Ok(()) if self.tavily_key.trim().is_empty() => "Key removed.".into(),
                         Ok(()) => "Saved.".into(),
                         Err(e) => e,
@@ -498,14 +527,120 @@ impl App {
                 }
             }
             ui.label(RichText::new(&choice.reason).size(13.0));
-            ui.add_space(6.0);
-            ui.label(
-                RichText::new("GigEyes picks the biggest model that leaves room for Gig Performer. It downloads when AI reading arrives in a later update.")
-                    .size(12.0)
-                    .weak(),
-            );
+            if let Some(model) = &choice.model {
+                ui.add_space(6.0);
+                let status = if model::is_downloaded(model) {
+                    "Downloaded, ready for when AI reading arrives."
+                } else {
+                    "Not downloaded. To get it, run GigEyes Setup again with \"Download the local AI\" ticked."
+                };
+                ui.label(RichText::new(status).size(13.0).weak());
+            }
+        });
+
+        ui.add_space(14.0);
+        let uninstaller = uninstaller();
+        card(ui, |ui| {
+            ui.label(semibold("Remove all GigEyes files", 17.0));
+            let what = if uninstaller.is_some() {
+                "Deletes your rig, saved research, search key, settings and the downloaded AI, then opens the uninstaller to remove the app itself."
+            } else {
+                "Deletes your rig, saved research, search key, settings and the downloaded AI from this PC."
+            };
+            ui.label(RichText::new(what).size(13.0).weak());
+            ui.add_space(10.0);
+            if !self.confirm_remove {
+                if ui.button("Remove all files…").clicked() {
+                    self.confirm_remove = true;
+                    self.remove_note = None;
+                }
+            } else {
+                ui.label(semibold("This can't be undone. Remove everything?", 15.0));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let remove =
+                        egui::Button::new(semibold("Remove everything", 15.0).color(error()));
+                    if ui.add(remove).clicked() {
+                        self.remove_all(ctx, uninstaller.as_deref());
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_remove = false;
+                    }
+                });
+            }
+            if let Some(note) = &self.remove_note {
+                ui.add_space(8.0);
+                ui.label(RichText::new(note).size(13.0));
+            }
+        });
+        ui.add_space(14.0);
+        ui.label(
+            RichText::new(format!("GigEyes {VERSION}"))
+                .size(12.0)
+                .weak(),
+        );
+    }
+
+    /// Delete everything GigEyes saved, then hand over to the uninstaller for the app itself.
+    fn remove_all(&mut self, ctx: &egui::Context, uninstaller: Option<&std::path::Path>) {
+        self.confirm_remove = false;
+        // Only GigEyes' own folders: %APPDATA%\GigEyes and %LOCALAPPDATA%\GigEyes (the AI model).
+        let folders = [
+            research::data_dir(),
+            model::dir().and_then(|d| d.parent().map(|p| p.to_path_buf())),
+        ];
+        let failed: Vec<String> = folders
+            .into_iter()
+            .flatten()
+            .filter_map(|dir| match std::fs::remove_dir_all(&dir) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    Some(format!("{}: {e}", dir.display()))
+                }
+                _ => None,
+            })
+            .collect();
+        if !failed.is_empty() {
+            self.remove_note = Some(format!(
+                "Some files couldn't be removed. {}",
+                failed.join("; ")
+            ));
+            return;
+        }
+        // Forget what was read from those files.
+        (self.rig, self.research, self.key_note) = (None, None, None);
+        self.tavily_key.clear();
+        self.remove_note = Some(match uninstaller {
+            Some(path) => match std::process::Command::new(path).arg("--uninstall").spawn() {
+                Ok(_) => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    "Your files are removed. Opening the uninstaller…".into()
+                }
+                Err(e) => format!("Your files are removed, but the uninstaller didn't start: {e}"),
+            },
+            None => "All GigEyes files are removed.".into(),
         });
     }
+}
+
+/// The uninstaller next to gigeyes.exe, when GigEyes was installed with the setup.
+fn uninstaller() -> Option<PathBuf> {
+    let path = std::env::current_exe()
+        .ok()?
+        .parent()?
+        .join("uninstall.exe");
+    path.is_file().then_some(path)
+}
+
+/// Light or dark: switch the palette, rebuild the style for that mode and show it.
+fn apply_theme(ctx: &egui::Context, light: bool) {
+    set_light(light);
+    let mode = if light {
+        egui::Theme::Light
+    } else {
+        egui::Theme::Dark
+    };
+    ctx.style_mut_of(mode, theme);
+    ctx.set_theme(mode);
 }
 
 /// Search excerpts can run long; keep a readable two or three lines.
@@ -585,6 +720,7 @@ impl eframe::App for App {
                             match self.screen {
                                 Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
                                 Screen::Rig => self.rig_view(ui),
+                                Screen::Settings => self.settings_view(ui, &ctx),
                             }
                             ui.add_space(32.0);
                         });
@@ -628,7 +764,11 @@ fn header(ui: &mut egui::Ui, screen: &mut Screen) {
             ui.label(RichText::new("Hear a tone. See where the knobs sit.").weak());
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            for (target, label) in [(Screen::Rig, "Your rig"), (Screen::Tone, "Tone")] {
+            for (target, label) in [
+                (Screen::Settings, "Settings"),
+                (Screen::Rig, "Your rig"),
+                (Screen::Tone, "Tone"),
+            ] {
                 if ui.selectable_label(*screen == target, label).clicked() {
                     *screen = target;
                 }
@@ -650,7 +790,7 @@ fn listening(ui: &mut egui::Ui) {
                 Pos2::new(x, rect.center().y - half),
                 Pos2::new(x, rect.center().y + half),
             ],
-            Stroke::new(3.0, ACCENT),
+            Stroke::new(3.0, accent()),
         );
     }
     ui.ctx().request_repaint();
@@ -659,26 +799,26 @@ fn listening(ui: &mut egui::Ui) {
 /// The big "drop a file here" area. Returns true when its button was clicked.
 fn drop_zone(ui: &mut egui::Ui, hovering: bool, busy: bool) -> bool {
     let stroke = if hovering {
-        Stroke::new(2.0, ACCENT)
+        Stroke::new(2.0, accent())
     } else {
-        Stroke::new(1.0, LINE)
+        Stroke::new(1.0, line())
     };
     egui::Frame::new()
-        .fill(SURFACE)
+        .fill(surface())
         .stroke(stroke)
         .corner_radius(CornerRadius::same(RADIUS))
         .inner_margin(36.0)
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.vertical_centered(|ui| {
-                ui.add(icon(ICON_FILE, 38.0, MUTED));
+                ui.add(icon(ICON_FILE, 38.0, muted()));
                 ui.add_space(12.0);
                 ui.label(semibold("Drop a song, a guitar stem or a live video", 19.0));
                 ui.add_space(4.0);
                 ui.label(RichText::new(AUDIO_TYPES.join(", ")).size(13.0).weak());
                 ui.add_space(18.0);
-                let button =
-                    egui::Button::new(semibold("Choose file…", 15.0).color(GROUND)).fill(ACCENT);
+                let button = egui::Button::new(semibold("Choose file…", 15.0).color(ON_ACCENT))
+                    .fill(accent());
                 ui.add_enabled(!busy, button).clicked()
             })
             .inner
@@ -696,12 +836,12 @@ fn input_row(ui: &mut egui::Ui, link: &mut String, compact: bool, busy: bool) ->
             pick = ui
                 .add_enabled(
                     !busy,
-                    egui::Button::image_and_text(icon(ICON_FILE, 16.0, INK), "Open file…"),
+                    egui::Button::image_and_text(icon(ICON_FILE, 16.0, ink()), "Open file…"),
                 )
                 .clicked();
             ui.add_space(6.0);
         }
-        ui.add(icon(ICON_LINK, 18.0, MUTED));
+        ui.add(icon(ICON_LINK, 18.0, muted()));
         let load_width = 84.0;
         let field = ui.add(
             egui::TextEdit::singleline(link)
@@ -809,7 +949,7 @@ fn dial(ui: &mut egui::Ui, knob: &Knob, reveal: f32, live: bool) {
             painter.circle_filled(
                 at(angle_at(tick as f32), r + 7.0),
                 if tick % 5 == 0 { 1.8 } else { 1.2 },
-                MUTED,
+                muted(),
             );
         }
         let value = if live {
@@ -817,16 +957,20 @@ fn dial(ui: &mut egui::Ui, knob: &Knob, reveal: f32, live: bool) {
         } else {
             knob.value
         };
-        let (arc_colour, pointer) = if live { (ACCENT, INK) } else { (LINE, MUTED) };
+        let (arc_colour, pointer) = if live {
+            (accent(), ink())
+        } else {
+            (line(), muted())
+        };
         painter.add(Shape::line(
             arc(angle_at(0.0), angle_at(10.0), r),
-            Stroke::new(3.0, RAISED),
+            Stroke::new(3.0, raised()),
         ));
         painter.add(Shape::line(
             arc(angle_at(0.0), angle_at(value), r),
             Stroke::new(3.0, arc_colour),
         ));
-        painter.circle(c, r - 7.0, RAISED, Stroke::new(1.0, LINE));
+        painter.circle(c, r - 7.0, raised(), Stroke::new(1.0, line()));
         painter.line_segment(
             [
                 at(angle_at(value), (r - 7.0) * 0.25),
@@ -867,7 +1011,7 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
         plot.left() + slot * 0.5 + (hz.log2() - first) / (last - first) * (plot.width() - slot)
     };
 
-    painter.rect_filled(rect, CornerRadius::same(RADIUS - 2), WELL);
+    painter.rect_filled(rect, CornerRadius::same(RADIUS - 2), well());
     // Frequency regions, every other one a tone step lighter, named along the top.
     let regions = [
         (60.0, 250.0, "Lows"),
@@ -886,7 +1030,7 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
             painter.rect_filled(
                 egui::Rect::from_x_y_ranges(x0..=x1, plot.y_range()),
                 0.0,
-                SURFACE.gamma_multiply(0.7),
+                surface().gamma_multiply(0.7),
             );
         }
         painter.text(
@@ -894,12 +1038,12 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
             Align2::CENTER_TOP,
             *label,
             FontId::proportional(12.0),
-            MUTED,
+            muted(),
         );
     }
     painter.line_segment(
         [plot.left_center(), plot.right_center()],
-        Stroke::new(1.0, LINE),
+        Stroke::new(1.0, line()),
     );
 
     let hovered = response
@@ -917,7 +1061,7 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
             x - slot * 0.3..=x + slot * 0.3,
             top..=bottom.max(top + 1.0),
         );
-        let colour = if hovered == Some(i) { INK } else { ACCENT };
+        let colour = if hovered == Some(i) { ink() } else { accent() };
         painter.rect_filled(bar, 3.0, colour);
     }
     for (hz, label) in [(100.0, "100 Hz"), (1000.0, "1 kHz"), (10_000.0, "10 kHz")] {
@@ -928,14 +1072,14 @@ fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
                 Align2::CENTER_BOTTOM,
                 label,
                 FontId::proportional(12.0),
-                MUTED,
+                muted(),
             );
         }
     }
     painter.rect_stroke(
         rect,
         CornerRadius::same(RADIUS - 2),
-        Stroke::new(1.0, LINE),
+        Stroke::new(1.0, line()),
         StrokeKind::Inside,
     );
 
@@ -961,7 +1105,7 @@ fn drop_overlay(ctx: &egui::Context) {
     painter.rect_stroke(
         rect.shrink(12.0),
         CornerRadius::same(RADIUS * 2),
-        Stroke::new(2.0, ACCENT),
+        Stroke::new(2.0, accent()),
         StrokeKind::Inside,
     );
     painter.text(
@@ -969,6 +1113,6 @@ fn drop_overlay(ctx: &egui::Context) {
         Align2::CENTER_CENTER,
         "Drop it. GigEyes is listening.",
         FontId::new(24.0, FontFamily::Name("semibold".into())),
-        INK,
+        ink(),
     );
 }
