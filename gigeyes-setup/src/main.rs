@@ -107,7 +107,13 @@ fn main() {
                 "GigEyes Setup"
             })
             .with_inner_size([500.0, 650.0])
-            .with_resizable(false),
+            .with_resizable(false)
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../../gigeyes/icons/gigeyes-256.png"
+                ))
+                .expect("the bundled icon is a valid PNG"),
+            ),
         ..Default::default()
     };
     // The local AI this PC can run, unless it's already downloaded. Silent installs never download it.

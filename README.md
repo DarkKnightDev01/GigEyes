@@ -1,3 +1,5 @@
+<img src="gigeyes/icons/gigeyes.svg" width="88" alt="GigEyes logo: an amber guitar pick with a sound wave cut into it">
+
 # GigEyes
 
 Recreate a guitar tone from a studio album or a live recording, using the plugins you already own, in whatever host you play through (Gig Performer, a DAW, anything that loads VST3).
@@ -75,6 +77,7 @@ target\release\gigeyes-setup.exe --pack GigEyes-Setup.exe target\release\gigeyes
 
 - [Barlow](https://github.com/jpt/barlow) typeface, SIL Open Font License (`gigeyes/fonts/OFL.txt`)
 - [Lucide](https://lucide.dev) icons, ISC License
+- The GigEyes logo (`gigeyes/icons/gigeyes.svg`) is drawn from the same shape as the mark in the app header.
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), Unlicense, installed alongside GigEyes
 - [Qwen3](https://huggingface.co/Qwen) models, Apache 2.0, for the local AI
 - [llama.cpp](https://github.com/ggml-org/llama.cpp), MIT License, runs the local AI (downloaded with it)

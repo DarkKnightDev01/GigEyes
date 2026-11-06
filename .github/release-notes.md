@@ -4,6 +4,8 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
+**New in 0.5.0.1:** GigEyes has a logo. The app, the setup, the taskbar, shortcuts and Installed apps now show the amber pick instead of a blank icon, and each file's Properties show its version. If you're on 0.5.0, this is a good test of the update banner: click **Update now**.
+
 **New in 0.5.0: AI reading**
 - After song research, click **Read the pages**. The local AI reads each page on your PC and lists the gear and any published settings: amps, pedals, guitars, pickups, strings and tuning. Each piece shows the sentence from the page that names it and links to the page. Anything the AI can't back with a sentence that's really on the page is dropped. The list is saved with the research and opens offline.
 - The AI runs only while it reads, then quits to free the memory for Gig Performer. **Stop** ends it at once.

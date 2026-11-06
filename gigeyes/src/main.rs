@@ -41,7 +41,11 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([780.0, 860.0])
-            .with_min_inner_size([520.0, 520.0]),
+            .with_min_inner_size([520.0, 520.0])
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../icons/gigeyes-256.png"))
+                    .expect("the bundled icon is a valid PNG"),
+            ),
         ..Default::default()
     };
     // A file passed on the command line (or dropped onto gigeyes.exe in Explorer) opens right away.
