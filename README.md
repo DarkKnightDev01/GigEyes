@@ -9,16 +9,16 @@ Pre-alpha. What works today:
 - **Tone analysis:** drop in a song, an isolated guitar track or a video link. GigEyes sums the tone up in one line, shows where an amp's Gain, Bass, Middle, Treble and Presence knobs would sit, and draws the EQ curve.
 - **Your rig:** GigEyes finds the VST3 plugins on your PC (it reads their names from disk and never loads them) and you tick the ones you play through.
 - **Song research:** with your own free search key, GigEyes finds interviews, rig rundowns and gear lists for the song, each linked so you can check it, and saves them so they open offline later.
-- **Local AI choice:** GigEyes reads your graphics card and memory and picks the biggest local model that still leaves room for Gig Performer. The setup offers to download it (untick to skip).
+- **AI reading:** a local AI reads the pages research found and lists the gear and any published settings, each with the sentence it came from and a link to the page. It runs on your PC, nothing is sent anywhere, and anything it can't back with a sentence that's really on the page is dropped.
+- **Local AI choice:** GigEyes reads your graphics card and memory and picks the biggest local model that still leaves room for Gig Performer. The setup offers to download it (untick to skip), or get it later in **Settings → Local AI**.
 - **Settings:** light or dark mode, your search key, the local AI, and **Remove all GigEyes files**.
 
 Coming next, in order:
 
-1. AI reading: the chosen local model reads the found pages and pulls out the gear and any published settings, each with a quote and a link
-2. Plugin knowledge: what real amps and pedals each popular plugin models, taken from the makers' own documentation
-3. Recommendations: which of your plugins for each stage and where to set each knob, saying which numbers come from a source and which from the audio
-4. Automatic tuning: GigEyes runs a dry recording of your guitar through your plugins, tunes the knobs and saves standard `.vstpreset` files any host can load
-5. Tone Library, fully offline
+1. Plugin knowledge: what real amps and pedals each popular plugin models, taken from the makers' own documentation
+2. Recommendations: which of your plugins for each stage and where to set each knob, saying which numbers come from a source and which from the audio
+3. Automatic tuning: GigEyes runs a dry recording of your guitar through your plugins, tunes the knobs and saves standard `.vstpreset` files any host can load
+4. Tone Library, fully offline
 
 ## Requirements
 
@@ -54,6 +54,10 @@ Or paste a link (YouTube and [most other video sites](https://github.com/yt-dlp/
 
 The key is stored in `%APPDATA%\GigEyes\settings.json` on your PC and sent only to Tavily.
 
+Then click **Read the pages** under **Gear on these pages**. The local AI starts, reads each page, and quits again to free the memory; **Stop** ends it at once. On a graphics card it takes about a minute, on the processor several. Each piece of gear shows the sentence from the page that names it, so you can check it. The list is saved with the research.
+
+The AI runs in [llama.cpp](https://github.com/ggml-org/llama.cpp)'s server, which GigEyes downloads with the model (38 MB, checked against a pinned checksum) into `%LOCALAPPDATA%\GigEyes`. It listens only on your own PC. If it won't start, what it said is in `%LOCALAPPDATA%\GigEyes\ai.log`.
+
 ## Building from source
 
 ```
@@ -72,5 +76,6 @@ target\release\gigeyes-setup.exe --pack GigEyes-Setup.exe target\release\gigeyes
 - [Barlow](https://github.com/jpt/barlow) typeface, SIL Open Font License (`gigeyes/fonts/OFL.txt`)
 - [Lucide](https://lucide.dev) icons, ISC License
 - [yt-dlp](https://github.com/yt-dlp/yt-dlp), Unlicense, installed alongside GigEyes
-- [Qwen3](https://huggingface.co/Qwen) models, Apache 2.0, for the local AI (downloaded only when AI reading arrives)
+- [Qwen3](https://huggingface.co/Qwen) models, Apache 2.0, for the local AI
+- [llama.cpp](https://github.com/ggml-org/llama.cpp), MIT License, runs the local AI (downloaded with it)
 - Search by [Tavily](https://tavily.com), with your own key

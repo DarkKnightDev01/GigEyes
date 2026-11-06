@@ -1,6 +1,7 @@
 // No console window behind the app on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod analysis;
 mod decode;
 mod fetch;
@@ -19,7 +20,7 @@ use eframe::egui::{
 use look::*;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -115,8 +116,19 @@ struct App {
     shown_at: f64,
     /// The old background while light and dark mode crossfade.
     theme_fade: Option<(Color32, f64)>,
-    /// Read once, the first time the rig screen opens.
+    /// Read once, the first time the AI is needed.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
+    /// The local AI reading the research pages: the page it's on (0 while it loads), Stop, and any error.
+    ai_job: Option<Receiver<Result<Vec<ai::Finding>, String>>>,
+    ai_page: Arc<AtomicUsize>,
+    ai_cancel: Arc<AtomicBool>,
+    ai_note: Option<String>,
+    /// Downloading the local AI from Settings: bytes done of the total, Stop, and any error.
+    get_ai: Option<Receiver<Result<PathBuf, String>>>,
+    get_ai_done: Arc<AtomicU64>,
+    get_ai_total: u64,
+    get_ai_cancel: Arc<AtomicBool>,
+    get_ai_note: Option<String>,
 }
 
 #[derive(Default, PartialEq, Clone, Copy)]
@@ -346,14 +358,195 @@ impl App {
                     ui.label(RichText::new(domain).size(12.0).weak());
                     ui.label(RichText::new(snippet(&source.snippet)).size(13.0));
                 }
-                ui.add_space(10.0);
-                ui.label(
-                    RichText::new("Next: a local AI reads these pages and pulls out the gear and any published settings.")
-                        .size(12.0)
-                        .weak(),
-                );
             }
+            self.gear_view(ui, ctx);
         });
+    }
+
+    /// Under the sources: the local AI reads the pages and lists the gear, each with its quote.
+    fn gear_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let pages = match &self.research {
+            Some(r) => r
+                .sources
+                .iter()
+                .filter(|s| !s.text.trim().is_empty())
+                .count(),
+            None => 0,
+        };
+        if pages == 0 {
+            return;
+        }
+        let choice = self.choice();
+        ui.add_space(18.0);
+        ui.label(semibold("Gear on these pages", 17.0));
+        if self.ai_job.is_some() {
+            let page = self.ai_page.load(Ordering::Relaxed);
+            let doing = match (page, &choice.model) {
+                (0, Some(m)) => format!("Starting {}…", m.name),
+                _ => format!("Reading page {page} of {pages}…"),
+            };
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                listening(ui);
+                ui.label(doing);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button("Stop").clicked() {
+                        self.ai_cancel.store(true, Ordering::Relaxed);
+                    }
+                });
+            });
+        } else {
+            let read = self.research.as_ref().is_some_and(|r| r.findings.is_some());
+            match &choice.model {
+                None => {
+                    ui.label(
+                        RichText::new("This PC can't spare the memory for the local AI, so the pages stay unread. The links above still work.")
+                            .size(13.0)
+                            .weak(),
+                    );
+                }
+                Some(model) if !model::is_downloaded(model) => {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(
+                            RichText::new("The local AI can read these pages and list the gear, with the sentence each piece comes from.")
+                                .size(13.0)
+                                .weak(),
+                        );
+                        if ui.link("Download it in Settings").clicked() {
+                            self.screen = Screen::Settings;
+                        }
+                    });
+                }
+                Some(model) => {
+                    if !read {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} reads the pages on this PC and lists the gear and settings they name, each with the sentence it came from. Nothing is sent anywhere.",
+                                model.name
+                            ))
+                            .size(13.0)
+                            .weak(),
+                        );
+                    }
+                    ui.add_space(8.0);
+                    let label = if read { "Read again" } else { "Read the pages" };
+                    if ui.button(label).clicked() {
+                        self.start_reading(ctx);
+                    }
+                }
+            }
+        }
+        if let Some(note) = &self.ai_note {
+            ui.add_space(8.0);
+            ui.colored_label(error(), note);
+        }
+        let Some(findings) = self.research.as_ref().and_then(|r| r.findings.as_ref()) else {
+            return;
+        };
+        if findings.is_empty() {
+            ui.add_space(8.0);
+            ui.label(
+                RichText::new("The AI found no gear these pages tie to the song.")
+                    .size(13.0)
+                    .weak(),
+            );
+        }
+        for f in findings {
+            ui.add_space(12.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.label(semibold(&f.gear, 15.0));
+                ui.label(RichText::new(&f.kind).size(12.0).weak());
+            });
+            if !f.settings.is_empty() {
+                ui.label(RichText::new(&f.settings).size(13.0).color(ink()));
+            }
+            ui.label(
+                RichText::new(format!("\u{201C}{}\u{201D}", f.quote))
+                    .size(13.0)
+                    .italics()
+                    .weak(),
+            );
+            let domain = f
+                .url
+                .split('/')
+                .nth(2)
+                .unwrap_or_default()
+                .trim_start_matches("www.");
+            ui.hyperlink_to(
+                RichText::new(domain)
+                    .size(12.0)
+                    .color(ui.visuals().hyperlink_color),
+                &f.url,
+            );
+        }
+    }
+
+    /// The local AI this PC can run, worked out once.
+    fn choice(&mut self) -> hardware::Choice {
+        self.hardware
+            .get_or_insert_with(|| {
+                let hw = hardware::detect();
+                let choice = hardware::choose(&hw);
+                (hw, choice)
+            })
+            .1
+            .clone()
+    }
+
+    fn start_reading(&mut self, ctx: &egui::Context) {
+        let choice = self.choice();
+        let (Some(research), Some(model)) = (self.research.clone(), choice.model) else {
+            return;
+        };
+        let gpu = choice.backend != hardware::Backend::Cpu;
+        // Fresh flags per read, so a stopped read still winding down can't touch this one.
+        self.ai_page = Arc::new(AtomicUsize::new(0));
+        self.ai_cancel = Arc::new(AtomicBool::new(false));
+        let (page, cancel, ctx) = (self.ai_page.clone(), self.ai_cancel.clone(), ctx.clone());
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(ai::read(&model, gpu, &research, &page, &cancel));
+            ctx.request_repaint();
+        });
+        self.ai_job = Some(rx);
+        self.ai_note = None;
+    }
+
+    /// Stop a read that's still going, e.g. because the research it was reading was replaced.
+    fn stop_reading(&mut self) {
+        self.ai_cancel.store(true, Ordering::Relaxed);
+        self.ai_job = None;
+        self.ai_note = None;
+    }
+
+    fn start_ai_download(&mut self, ctx: &egui::Context) {
+        let Some(model) = self.choice().model else {
+            return;
+        };
+        self.get_ai_total = model::missing_bytes(&model);
+        self.get_ai_done = Arc::new(AtomicU64::new(0));
+        self.get_ai_cancel = Arc::new(AtomicBool::new(false));
+        let (done, cancel, ctx) = (
+            self.get_ai_done.clone(),
+            self.get_ai_cancel.clone(),
+            ctx.clone(),
+        );
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut shown = 0;
+            let result = model::download(&model, &cancel, |bytes| {
+                done.store(bytes, Ordering::Relaxed);
+                // A repaint every 8 MB is plenty for a bar gigabytes long.
+                if bytes - shown >= 8 << 20 {
+                    shown = bytes;
+                    ctx.request_repaint();
+                }
+            });
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.get_ai = Some(rx);
+        self.get_ai_note = None;
     }
 
     fn rig_view(&mut self, ui: &mut egui::Ui) {
@@ -512,11 +705,8 @@ impl App {
         });
 
         ui.add_space(14.0);
-        let (hw, choice) = self.hardware.get_or_insert_with(|| {
-            let hw = hardware::detect();
-            let choice = hardware::choose(&hw);
-            (hw, choice)
-        });
+        let choice = self.choice();
+        let hw = self.hardware.as_ref().expect("read by choice()").0.clone();
         card(ui, |ui| {
             ui.label(semibold("Local AI", 17.0));
             let gpu = match &hw.gpu {
@@ -545,13 +735,57 @@ impl App {
             }
             ui.label(RichText::new(&choice.reason).size(13.0));
             if let Some(model) = &choice.model {
-                ui.add_space(6.0);
-                let status = if model::is_downloaded(model) {
-                    "Downloaded, ready for when AI reading arrives."
+                ui.add_space(8.0);
+                if self.get_ai.is_some() {
+                    let done = self.get_ai_done.load(Ordering::Relaxed);
+                    let shown = ctx.animate_value_with_time(
+                        egui::Id::NULL.with("get-ai-bar"),
+                        done as f32 / self.get_ai_total.max(1) as f32,
+                        secs(0.3),
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(shown)
+                            .fill(accent())
+                            .desired_height(6.0)
+                            .corner_radius(3),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.1} of {:.1} GB",
+                                done as f32 / 1e9,
+                                self.get_ai_total as f32 / 1e9
+                            ))
+                            .size(13.0)
+                            .weak(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Stop").clicked() {
+                                self.get_ai_cancel.store(true, Ordering::Relaxed);
+                            }
+                        });
+                    });
+                } else if model::is_downloaded(model) {
+                    ui.label(
+                        RichText::new("Downloaded. It reads your research pages when you ask, then quits to free the memory.")
+                            .size(13.0)
+                            .weak(),
+                    );
                 } else {
-                    "Not downloaded. To get it, run GigEyes Setup again with \"Download the local AI\" ticked."
-                };
-                ui.label(RichText::new(status).size(13.0).weak());
+                    let missing = model::missing_bytes(model) as f32 / 1e9;
+                    let go = egui::Button::new(
+                        semibold(format!("Download, {missing:.1} GB"), 15.0).color(ON_ACCENT),
+                    )
+                    .fill(accent());
+                    if ui.add(go).clicked() {
+                        self.start_ai_download(ctx);
+                    }
+                }
+                if let Some(note) = &self.get_ai_note {
+                    ui.add_space(6.0);
+                    ui.colored_label(error(), note);
+                }
             }
         });
 
@@ -708,6 +942,9 @@ impl App {
     /// Delete everything GigEyes saved, then hand over to the uninstaller for the app itself.
     fn remove_all(&mut self, ctx: &egui::Context, uninstaller: Option<&std::path::Path>) {
         self.confirm_remove = false;
+        // A running AI holds its files open, and Windows won't delete open files.
+        self.stop_reading();
+        self.get_ai_cancel.store(true, Ordering::Relaxed);
         // Only GigEyes' own folders: %APPDATA%\GigEyes and %LOCALAPPDATA%\GigEyes (the AI model).
         let folders = [
             research::data_dir(),
@@ -793,6 +1030,7 @@ impl eframe::App for App {
                     self.research = research::cached(&self.song);
                     self.research_job = None; // a search still running was for the previous song
                     self.research_note = None;
+                    self.stop_reading();
                     State::Done(name, tone)
                 }
                 Err(e) => State::Failed(e),
@@ -807,10 +1045,30 @@ impl eframe::App for App {
                 Ok(found) => {
                     self.research_note = research::save(&found).err();
                     self.research = Some(found);
+                    self.stop_reading(); // it was reading the sources just replaced
                 }
                 Err(e) => self.research_note = Some(e),
             }
             self.research_job = None;
+        }
+        if let Some(rx) = &self.ai_job
+            && let Ok(read) = rx.try_recv()
+        {
+            self.ai_job = None;
+            match (read, &mut self.research) {
+                (Ok(findings), Some(research)) => {
+                    research.findings = Some(findings);
+                    self.ai_note = research::save(research).err();
+                }
+                (Err(e), _) if e != ai::STOPPED => self.ai_note = Some(e),
+                _ => {}
+            }
+        }
+        if let Some(rx) = &self.get_ai
+            && let Ok(got) = rx.try_recv()
+        {
+            self.get_ai = None;
+            self.get_ai_note = got.err().filter(|e| e != "Skipped.");
         }
         if let Some(path) =
             ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()))

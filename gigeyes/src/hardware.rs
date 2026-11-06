@@ -25,7 +25,7 @@ pub enum Vendor {
     Other,
 }
 
-/// How the model runs: llama.cpp's CUDA build on NVIDIA, its Vulkan build on other cards, or the CPU.
+/// Where the model runs. Both graphics-card cases use llama.cpp's Vulkan build (see `model::ENGINE`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Backend {
     Cuda,

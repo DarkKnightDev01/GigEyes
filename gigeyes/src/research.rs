@@ -37,6 +37,9 @@ pub struct Research {
     pub sources: Vec<Source>,
     /// Unix seconds when it was searched.
     pub searched_at: u64,
+    /// What the local AI found on the pages; None until it has read them.
+    #[serde(default)]
+    pub findings: Option<Vec<crate::ai::Finding>>,
 }
 
 /// "Metallica - Enter Sandman (Official Music Video) [HD].m4a" → "Metallica - Enter Sandman".
@@ -155,6 +158,7 @@ fn search_at(base: &str, key: &str, song: &str) -> Result<Research, String> {
         song: song.to_string(),
         sources,
         searched_at,
+        findings: None,
     })
 }
 

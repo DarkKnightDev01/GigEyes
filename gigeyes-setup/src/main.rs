@@ -121,6 +121,7 @@ fn main() {
     let app = Setup {
         get_ai: ai.is_some(),
         ai,
+        ai_bytes: ai.map_or(0, |m| model::missing_bytes(&m)),
         ai_note: None,
         cancel: Arc::new(AtomicBool::new(false)),
         me,
@@ -191,6 +192,8 @@ struct Setup {
     /// The model picked for this PC (None when it doesn't fit or is already there), and whether to get it.
     ai: Option<hardware::Model>,
     get_ai: bool,
+    /// What's left to download of the AI: the engine and the model, whichever is missing.
+    ai_bytes: u64,
     ai_note: Option<String>,
     cancel: Arc<AtomicBool>,
     /// The version already installed, if any: the button then says Update.
@@ -344,7 +347,7 @@ impl eframe::App for Setup {
                         ui.add(
                             egui::ProgressBar::new(ctx.animate_value_with_time(
                                 egui::Id::NULL.with("ai-bar"),
-                                *done as f32 / model.bytes as f32,
+                                *done as f32 / self.ai_bytes.max(1) as f32,
                                 secs(0.3),
                             ))
                                 .fill(accent())
@@ -356,7 +359,7 @@ impl eframe::App for Setup {
                             RichText::new(format!(
                                 "{:.1} of {:.1} GB. GigEyes is installed already; this is the local AI.",
                                 gb(*done),
-                                gb(model.bytes)
+                                gb(self.ai_bytes)
                             ))
                             .size(13.0)
                             .weak(),
@@ -418,7 +421,8 @@ impl Setup {
                     Some(
                         RichText::new(format!(
                             "{}, {:.1} GB, picked for this PC. Untick to skip it.",
-                            model.name, model.size_gb
+                            model.name,
+                            self.ai_bytes as f32 / 1e9
                         ))
                         .size(13.0)
                         .weak(),
