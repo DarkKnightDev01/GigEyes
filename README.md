@@ -51,7 +51,7 @@ Or paste a link (YouTube and [most other video sites](https://github.com/yt-dlp/
 ### Song research
 
 1. Get a free key at [app.tavily.com](https://app.tavily.com/): 1,000 searches a month, no card needed.
-2. In GigEyes open **Settings**, paste the key under **Song research** and click **Save key**.
+2. In GigEyes open **Settings**, paste the key under **Song research**. It saves as you paste it.
 3. After reading a song, check the artist and title under **Research this song** and click **Find sources**.
 
 The key is stored in `%APPDATA%\GigEyes\settings.json` on your PC and sent only to Tavily.

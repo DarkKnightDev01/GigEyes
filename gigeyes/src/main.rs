@@ -691,9 +691,9 @@ impl App {
                     .password(true)
                     .margin(Vec2::new(10.0, 7.0))
                     .desired_width(320.0);
-                let enter =
-                    ui.add(field).lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.button("Save key").clicked() || enter {
+                // Saved as soon as it's typed or pasted: research uses the key at once, so it has
+                // to outlast a restart or an update too, with no button to forget.
+                if ui.add(field).changed() {
                     let mut settings = research::load_settings();
                     settings.tavily_key = self.tavily_key.trim().to_string();
                     self.key_note = Some(match research::save_settings(&settings) {

@@ -61,6 +61,9 @@ jobs:
           $dir = "$env:ProgramFiles\GigEyes"
 
           Run-Setup (Get-ChildItem old\v0.4.0.1\*.exe).FullName "installing 0.4.0.1"
+          # The user's settings and search key live in their AppData and must survive every update.
+          New-Item -ItemType Directory -Force "$env:APPDATA\GigEyes" | Out-Null
+          Set-Content "$env:APPDATA\GigEyes\settings.json" '{"tavily_key":"tvly-kept","light":false}'
           if (-not (Test-Path "$perUser\gigeyes.exe")) { throw "0.4.0.1 didn't install per user" }
           Run-Setup (Get-ChildItem "old\$newest\*.exe").FullName "updating to $newest"
           Run-Setup dist/GigEyes-Setup.exe "updating to this build ($want)"
@@ -77,12 +80,14 @@ jobs:
           if ($exe -ne $want) { throw "gigeyes.exe is $exe, expected $want" }
           $files = (Get-ChildItem $dir -Name | Sort-Object) -join ','
           if ($files -ne 'gigeyes.exe,uninstall.exe,yt-dlp.exe') { throw "unexpected files in $dir`: $files" }
+          if (-not (Select-String -Quiet 'tvly-kept' "$env:APPDATA\GigEyes\settings.json")) { throw "the search key was lost in the update" }
           "Updated from 0.4.0.1 through $newest to $want, one copy left."
 
           $u = Start-Process "$dir\uninstall.exe" -Wait -PassThru -ArgumentList '--uninstall', '--silent'
           if ($u.ExitCode -ne 0) { throw "uninstall after the update failed" }
           Start-Sleep -Seconds 6
           if ((Test-Path $dir) -or (Test-Path $machine)) { throw "uninstall after the update left GigEyes behind" }
+          Remove-Item -Recurse -Force "$env:APPDATA\GigEyes"
         env:
           GH_TOKEN: ${{ github.token }}
       - name: Install and uninstall on this Windows machine
