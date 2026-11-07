@@ -203,6 +203,12 @@ mod system {
                 let _ = std::fs::remove_file(link); // unticked on an update: take the old one away
             }
         }
+        // Explorer caches icons per file; tell it to drop them so shortcuts show the new icon at once.
+        // SAFETY: a notification with no item pointers.
+        unsafe {
+            use windows::Win32::UI::Shell::{SHCNE_ASSOCCHANGED, SHCNF_IDLIST, SHChangeNotify};
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, None, None);
+        }
         let uninstall = format!("\"{}\" --uninstall", opts.dir.join(UNINSTALLER).display());
         let (key, _) = RegKey::predef(HKEY_LOCAL_MACHINE)
             .create_subkey(UNINSTALL_KEY)

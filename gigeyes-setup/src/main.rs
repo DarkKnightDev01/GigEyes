@@ -159,6 +159,7 @@ fn main() {
         "GigEyes Setup",
         options,
         Box::new(|cc| {
+            window_icon(cc);
             cc.egui_ctx.set_fonts(fonts());
             cc.egui_ctx.set_theme(egui::Theme::Dark);
             cc.egui_ctx.style_mut_of(egui::Theme::Dark, theme);

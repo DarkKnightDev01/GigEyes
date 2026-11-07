@@ -59,7 +59,7 @@ pub fn error() -> Color32 {
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x14, 0x13, 0x11);
 pub const RADIUS: u8 = 8;
 /// The version people see. Four parts, Windows style; Cargo's own version only allows three.
-pub const VERSION: &str = "0.5.0.1";
+pub const VERSION: &str = "0.5.0.2";
 /// Barlow (SIL Open Font License, see fonts/OFL.txt), with egui's own fonts behind it for missing glyphs.
 pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
@@ -253,6 +253,56 @@ pub fn card(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 
 // Motion, after Apple's fluid-interface rules: things start from where they are now (so any animation
 // can be interrupted), settle without bouncing, and stay out of the way when Windows animations are off.
+
+/// Give the window the icon built into the exe (resource 1, see build.rs), for its title bar, the
+/// taskbar and Alt+Tab. eframe only does this when the window starts in the foreground, which it
+/// often doesn't when opened after an update or by the setup.
+pub fn window_icon(cc: &eframe::CreationContext) {
+    #[cfg(windows)]
+    {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+        use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW,
+            SM_CXICON, SM_CXSMICON, SendMessageW, WM_SETICON,
+        };
+        let Ok(handle) = cc.window_handle() else {
+            return;
+        };
+        let RawWindowHandle::Win32(win) = handle.as_raw() else {
+            return;
+        };
+        let hwnd = HWND(win.hwnd.get() as *mut _);
+        // SAFETY: plain Win32 calls on this process's own module and window; the handles are checked.
+        unsafe {
+            let Ok(module) = GetModuleHandleW(None) else {
+                return;
+            };
+            for (kind, metric) in [(ICON_BIG, SM_CXICON), (ICON_SMALL, SM_CXSMICON)] {
+                let size = GetSystemMetrics(metric);
+                let name = windows::core::PCWSTR(std::ptr::without_provenance(1)); // MAKEINTRESOURCE(1)
+                if let Ok(icon) = LoadImageW(
+                    Some(module.into()),
+                    name,
+                    IMAGE_ICON,
+                    size,
+                    size,
+                    LR_DEFAULTCOLOR,
+                ) {
+                    SendMessageW(
+                        hwnd,
+                        WM_SETICON,
+                        Some(WPARAM(kind as usize)),
+                        Some(LPARAM(icon.0 as isize)),
+                    );
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = cc;
+}
 
 /// Windows' "Show animations in Windows" setting. Off means every animation jumps to its end.
 pub fn motion() -> bool {

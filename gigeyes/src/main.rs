@@ -55,6 +55,7 @@ fn main() -> eframe::Result {
         "GigEyes",
         options,
         Box::new(|cc| {
+            window_icon(cc);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             cc.egui_ctx.set_fonts(fonts());
             let settings = research::load_settings();
