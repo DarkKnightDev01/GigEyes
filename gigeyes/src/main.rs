@@ -862,6 +862,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let ctx = ctx.clone();
         thread::spawn(move || {
+            update::clear_downloads();
             let _ = tx.send(update::check(VERSION));
             ctx.request_repaint();
         });

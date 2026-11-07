@@ -4,7 +4,9 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.5.0.2:** the GigEyes icon now shows in the window's title bar and on the taskbar too, not just on the files. 0.5.0.1 put the icon in the program, but the window only picked it up if it opened in front, and after an update it usually opens behind. The setup also tells Windows to refresh its icon cache, so shortcuts switch to the new icon straight away.
+**New in 0.5.0.3:** updates clean up after themselves. Each update used to leave its downloaded setup (about 60 MB) in your temp folder; GigEyes now deletes those when it starts. Every build is now also tested updating from 0.4.0.1 through the previous release on a real Windows machine, and must end with exactly one GigEyes in Installed apps at the new version.
+
+**In 0.5.0.2:** the GigEyes icon now shows in the window's title bar and on the taskbar too, not just on the files. 0.5.0.1 put the icon in the program, but the window only picked it up if it opened in front, and after an update it usually opens behind. The setup also tells Windows to refresh its icon cache, so shortcuts switch to the new icon straight away.
 
 **In 0.5.0.1:** GigEyes got its logo, the amber pick, on the app, the setup, shortcuts and Installed apps, and each file's Properties show its version.
 

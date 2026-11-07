@@ -41,6 +41,50 @@ jobs:
             '--pack', 'dist/GigEyes-Setup.exe', 'target/release/gigeyes.exe', 'target/release/yt-dlp.exe'
           if ($p.ExitCode -ne 0) { Get-Content pack-errors.txt; throw "packing the installer failed ($($p.ExitCode))" }
           Get-Item dist/GigEyes-Setup.exe | Select-Object Name, Length
+      # An update must leave exactly one GigEyes: from the per-user 0.4.0.1, through the newest
+      # published release, to this build, then a clean uninstall.
+      - name: Update over older versions on this Windows machine
+        run: |
+          $want = (Select-String 'pub const VERSION: &str = "(.+)";' gigeyes/src/look.rs).Matches[0].Groups[1].Value
+          $newest = gh api "repos/$env:GITHUB_REPOSITORY/releases" --jq '[.[] | select(.draft | not)][0].tag_name'
+          New-Item -ItemType Directory -Force old | Out-Null
+          foreach ($tag in 'v0.4.0.1', $newest) {
+            gh release download $tag --repo $env:GITHUB_REPOSITORY --pattern 'GigEyes-Setup-*.exe' --dir "old\$tag"
+          }
+          function Run-Setup($exe, $what) {
+            $p = Start-Process $exe -Wait -PassThru -RedirectStandardError "$env:RUNNER_TEMP\setup-errors.txt" -ArgumentList '--silent'
+            if ($p.ExitCode -ne 0) { Get-Content "$env:RUNNER_TEMP\setup-errors.txt"; throw "$what failed" }
+          }
+          $machine = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes"
+          $user = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\GigEyes"
+          $perUser = "$env:LOCALAPPDATA\Programs\GigEyes"
+          $dir = "$env:ProgramFiles\GigEyes"
+
+          Run-Setup (Get-ChildItem old\v0.4.0.1\*.exe).FullName "installing 0.4.0.1"
+          if (-not (Test-Path "$perUser\gigeyes.exe")) { throw "0.4.0.1 didn't install per user" }
+          Run-Setup (Get-ChildItem "old\$newest\*.exe").FullName "updating to $newest"
+          Run-Setup dist/GigEyes-Setup.exe "updating to this build ($want)"
+
+          if (Test-Path $user) { throw "the per-user Installed apps entry from 0.4.0.1 is still there" }
+          if (Test-Path $perUser) { throw "the per-user copy from 0.4.0.1 is still there: $(Get-ChildItem $perUser -Name)" }
+          if (Test-Path "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\GigEyes.lnk") { throw "the per-user Start menu shortcut is still there" }
+          $entries = @(Get-ChildItem 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall', 'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall' -ErrorAction SilentlyContinue |
+            Where-Object { (Get-ItemProperty $_.PSPath).DisplayName -eq 'GigEyes' })
+          if ($entries.Count -ne 1) { throw "Installed apps lists GigEyes $($entries.Count) times" }
+          $listed = (Get-ItemProperty $machine).DisplayVersion
+          if ($listed -ne $want) { throw "Installed apps says $listed, expected $want" }
+          $exe = (Get-Item "$dir\gigeyes.exe").VersionInfo.ProductVersion
+          if ($exe -ne $want) { throw "gigeyes.exe is $exe, expected $want" }
+          $files = (Get-ChildItem $dir -Name | Sort-Object) -join ','
+          if ($files -ne 'gigeyes.exe,uninstall.exe,yt-dlp.exe') { throw "unexpected files in $dir`: $files" }
+          "Updated from 0.4.0.1 through $newest to $want, one copy left."
+
+          $u = Start-Process "$dir\uninstall.exe" -Wait -PassThru -ArgumentList '--uninstall', '--silent'
+          if ($u.ExitCode -ne 0) { throw "uninstall after the update failed" }
+          Start-Sleep -Seconds 6
+          if ((Test-Path $dir) -or (Test-Path $machine)) { throw "uninstall after the update left GigEyes behind" }
+        env:
+          GH_TOKEN: ${{ github.token }}
       - name: Install and uninstall on this Windows machine
         run: |
           $dir = "$env:RUNNER_TEMP\InstallTest"

@@ -101,7 +101,24 @@ fn check_at(url: &str, current: &str) -> Result<Option<Update>, String> {
     }))
 }
 
-/// Download the update's setup into a temporary folder (cleared on a later start) and check it.
+/// Delete the setups earlier updates downloaded (about 60 MB each). Only GigEyes' own
+/// `gigeyes-update-*` folders in the temp folder; a setup that's still running is left for next time.
+pub fn clear_downloads() {
+    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("gigeyes-update-")
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Download the update's setup into a temporary folder (cleared by `clear_downloads`) and check it.
 pub fn download(update: &Update, mut progress: impl FnMut(u64)) -> Result<PathBuf, String> {
     let dir = std::env::temp_dir().join(format!("gigeyes-update-{}", update.version));
     std::fs::create_dir_all(&dir).map_err(|e| format!("Can't create {}: {e}", dir.display()))?;
@@ -176,6 +193,21 @@ mod tests {
         assert!(newer("v0.10.0", "0.9.9"));
         assert!(!newer("v0.4.0-prealpha.1", "0.4.0.1"));
         assert!(!newer("v0.4.0.1", "0.4.0.1"));
+    }
+
+    #[test]
+    fn clears_old_update_downloads_and_nothing_else() {
+        let temp = std::env::temp_dir();
+        let old = temp.join(format!("gigeyes-update-test-{}", std::process::id()));
+        let other = temp.join(format!("gigeyes-keep-{}", std::process::id()));
+        for dir in [&old, &other] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("GigEyes-Setup.exe"), "x").unwrap();
+        }
+        clear_downloads();
+        assert!(!old.exists(), "the old download is gone");
+        assert!(other.exists(), "other folders stay");
+        std::fs::remove_dir_all(other).unwrap();
     }
 
     fn github(body: &'static str) -> String {
