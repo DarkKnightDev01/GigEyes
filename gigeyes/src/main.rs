@@ -39,8 +39,17 @@ const ICON_LINK: ImageSource = egui::include_image!("../icons/link.svg");
 const ICON_ALERT: ImageSource = egui::include_image!("../icons/alert.svg");
 
 fn main() -> eframe::Result {
+    let mut settings = research::load_settings();
+    let seen = settings.intro_seen.clone();
+    let intro_queued = settings.intro_now(VERSION);
+    if settings.intro_seen != seen {
+        let _ = research::save_settings(&settings);
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            // No title bar while the intro plays: just the dark window and the logo. It comes back
+            // as the logo glides into the header.
+            .with_decorations(!intro_queued)
             .with_inner_size([780.0, 860.0])
             .with_min_inner_size([520.0, 520.0])
             .with_icon(
@@ -55,22 +64,18 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "GigEyes",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             window_icon(cc);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             cc.egui_ctx.set_fonts(fonts());
-            let mut settings = research::load_settings();
             apply_theme(&cc.egui_ctx, settings.light);
-            let seen = settings.intro_seen.clone();
-            let intro_queued = settings.intro_now(VERSION);
-            if settings.intro_seen != seen {
-                let _ = research::save_settings(&settings);
-            }
             let mut app = App {
                 rig: rig::load(),
                 tavily_key: settings.tavily_key,
                 intro_queued,
                 intro_choice: settings.intro,
+                intro_length: settings.intro_length.clamp(1.5, 4.0),
+                bare: intro_queued,
                 ..App::default()
             };
             app.check_updates(&cc.egui_ctx);
@@ -133,6 +138,9 @@ struct App {
     intro_queued: bool,
     intro_at: Option<f64>,
     intro_choice: research::Intro,
+    intro_length: f32,
+    /// The window has no title bar yet (only while the startup intro plays).
+    bare: bool,
     /// Read once, the first time the AI is needed.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
     /// The local AI reading the research pages: the page it's on (0 while it loads), Stop, and any error.
@@ -697,21 +705,40 @@ impl App {
                     .weak(),
             );
             ui.add_space(10.0);
+            let options = [
+                (research::Intro::Off, "Off"),
+                (research::Intro::EveryLaunch, "Every launch"),
+                (research::Intro::AfterUpdate, "After updates"),
+            ];
+            if segmented(ui, "intro", &mut self.intro_choice, &options) {
+                let mut settings = research::load_settings();
+                settings.intro = self.intro_choice;
+                self.key_note = research::save_settings(&settings).err();
+            }
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                let options = [
-                    (research::Intro::EveryLaunch, "Every launch"),
-                    (research::Intro::AfterUpdate, "After updates"),
-                ];
-                if segmented(ui, "intro", &mut self.intro_choice, &options) {
+                ui.label(RichText::new("Length").size(13.0));
+                ui.add_space(6.0);
+                ui.spacing_mut().slider_width = 220.0;
+                ui.visuals_mut().selection.bg_fill = accent(); // the filled part of the rail
+                let slider = ui.add(
+                    egui::Slider::new(&mut self.intro_length, 1.5..=4.0)
+                        .trailing_fill(true)
+                        .step_by(0.1)
+                        .fixed_decimals(1)
+                        .suffix(" s"),
+                );
+                // Saved once the slider is let go (or after a keyboard step), not on every frame of a drag.
+                if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                     let mut settings = research::load_settings();
-                    settings.intro = self.intro_choice;
+                    settings.intro_length = self.intro_length;
                     self.key_note = research::save_settings(&settings).err();
                 }
-                ui.add_space(12.0);
-                if ui.button("Play it now").clicked() {
-                    self.intro_at = Some(ctx.input(|i| i.time));
-                }
             });
+            ui.add_space(10.0);
+            if ui.button("Play it now").clicked() {
+                self.intro_at = Some(ctx.input(|i| i.time));
+            }
         });
 
         ui.add_space(14.0);
@@ -1155,10 +1182,14 @@ impl eframe::App for App {
         });
         let intro = self
             .intro_at
-            .map(|at| now - at)
-            .filter(|&elapsed| elapsed < intro::END && !skip);
+            .filter(|_| !skip)
+            .and_then(|at| intro::at(now - at, self.intro_length as f64));
         if intro.is_none() {
             self.intro_at = None;
+        }
+        if self.bare && intro.is_none_or(intro::gliding) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            self.bare = false;
         }
         let (head_in, body_in) = intro.map_or((1.0, 1.0), intro::content);
         let mut home = egui::Rect::NOTHING;

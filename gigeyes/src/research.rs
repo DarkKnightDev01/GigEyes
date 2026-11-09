@@ -219,7 +219,7 @@ pub fn save(research: &Research) -> Result<(), String> {
 
 /// `settings.json`. Missing fields read as their defaults, so older files still load.
 /// shortcut: the Tavily key is plain text in the user's own AppData; move it to Windows Credential Manager before wider release.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub tavily_key: String,
@@ -228,10 +228,25 @@ pub struct Settings {
     pub intro: Intro,
     /// The version that last played it, so "after updates" knows when there's a new one.
     pub intro_seen: String,
+    /// How long the intro lasts, in seconds (1.5 to 4).
+    pub intro_length: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            tavily_key: String::new(),
+            light: false,
+            intro: Intro::default(),
+            intro_seen: String::new(),
+            intro_length: 2.5,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
 pub enum Intro {
+    Off,
     #[default]
     EveryLaunch,
     AfterUpdate,
@@ -242,7 +257,11 @@ impl Settings {
     pub fn intro_now(&mut self, version: &str) -> bool {
         let new = self.intro_seen != version;
         self.intro_seen = version.to_string();
-        self.intro == Intro::EveryLaunch || new
+        match self.intro {
+            Intro::Off => false,
+            Intro::EveryLaunch => true,
+            Intro::AfterUpdate => new,
+        }
     }
 }
 
@@ -303,11 +322,19 @@ mod tests {
         );
         assert!(!after.intro_now("0.5.0.5"), "the next launch doesn't");
         assert!(after.intro_now("0.5.0.6"), "an update plays it again");
+        let mut off = Settings {
+            intro: Intro::Off,
+            ..Settings::default()
+        };
+        assert!(
+            !off.intro_now("0.5.0.7"),
+            "off means off, even after an update"
+        );
         // Settings files from before this field existed still load, with the intro on.
         let old: Settings = serde_json::from_str(r#"{"tavily_key":"k","light":true}"#).unwrap();
         assert_eq!(
-            (old.intro, old.tavily_key.as_str()),
-            (Intro::EveryLaunch, "k")
+            (old.intro, old.tavily_key.as_str(), old.intro_length),
+            (Intro::EveryLaunch, "k", 2.5)
         );
     }
 

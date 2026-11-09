@@ -1,7 +1,8 @@
 //! The startup intro, so GigEyes doesn't just pop up. The amber pick fades and scales in, its five
 //! bars rise one after another like a level meter and "GigEyes" fades in underneath; the name fades
 //! away, then the pick glides into its place in the header while the header and the screen below
-//! settle in. 3 seconds; a click, a key or a dropped file skips it. It plays even when Windows animations are off: that's how the user asked for it.
+//! settle in. 2.5 seconds unless Settings says otherwise; a click, a key or a dropped file skips it.
+//! It plays even when Windows animations are off: that's how the user asked for it.
 
 use crate::look::{ink, paint_mark};
 use eframe::egui::{self, Rect, Vec2};
@@ -12,22 +13,46 @@ const EASE_OUT: [f32; 4] = [0.23, 1.0, 0.32, 1.0];
 const EASE_IN_OUT: [f32; 4] = [0.77, 0.0, 0.175, 1.0];
 const OVERSHOOT: [f32; 4] = [0.34, 1.56, 0.64, 1.0];
 
-/// (start, length) in seconds from the first frame.
+/// The base timeline: (start, length) in seconds from the first frame, with the name leaving as soon
+/// as it has arrived. A longer intro holds the name on screen in between (see `at`).
 const PICK: (f64, f64) = (0.05, 0.50);
 const BARS_FROM: f64 = 0.25;
 const BAR_STAGGER: f64 = 0.05;
 const BAR_LENGTH: f64 = 0.30;
-/// The name arrives as the bars finish, holds for about a second, and leaves faster than it came.
+/// The name arrives as the bars finish and leaves faster than it came.
 const NAME_IN: (f64, f64) = (0.65, 0.45);
-const NAME_OUT: (f64, f64) = (2.20, 0.30);
-const GLIDE: (f64, f64) = (2.45, 0.50);
-const HEADER: (f64, f64) = (2.60, 0.30);
-const BODY: (f64, f64) = (2.70, 0.30);
-pub const END: f64 = 3.00;
+const NAME_SHOWN: f64 = NAME_IN.0 + NAME_IN.1;
+const NAME_OUT: (f64, f64) = (NAME_SHOWN, 0.30);
+const GLIDE: (f64, f64) = (1.35, 0.50);
+const HEADER: (f64, f64) = (1.50, 0.30);
+const BODY: (f64, f64) = (1.60, 0.30);
+/// The base timeline's length: the shortest intro that plays at full speed.
+const BASE: f64 = 1.90;
 /// The pick's size in the middle of the window, before it glides into its 40 px header slot.
 const BIG: f32 = 120.0;
 /// It starts a little small, never from nothing.
 const START_SCALE: f32 = 0.9;
+
+/// Where `elapsed` real seconds into an intro `length` seconds long fall on the base timeline, or
+/// None once it's over. Extra length holds the name on screen; a length under BASE plays it all faster.
+pub fn at(elapsed: f64, length: f64) -> Option<f64> {
+    if elapsed >= length {
+        return None;
+    }
+    let hold = length - BASE;
+    Some(if hold < 0.0 {
+        elapsed * BASE / length
+    } else if elapsed < NAME_SHOWN {
+        elapsed
+    } else {
+        (elapsed - hold).max(NAME_SHOWN)
+    })
+}
+
+/// The pick has started gliding to the header (`t` on the base timeline).
+pub fn gliding(t: f64) -> bool {
+    t >= GLIDE.0
+}
 
 /// How far the header and the screen below are through settling in, eased, at `elapsed`.
 pub fn content(elapsed: f64) -> (f32, f32) {
@@ -118,9 +143,9 @@ mod tests {
     #[test]
     fn the_timeline_starts_empty_and_ends_settled() {
         assert_eq!(content(0.0), (0.0, 0.0));
-        assert_eq!(content(END), (1.0, 1.0));
+        assert_eq!(content(BASE), (1.0, 1.0));
         assert_eq!(step(PICK, 0.0, EASE_OUT), 0.0);
-        // Everything has landed by END, the last bar included.
+        // Everything has landed by the end of the base timeline, the last bar included.
         let last_bar = BARS_FROM + 4.0 * BAR_STAGGER + BAR_LENGTH;
         for done in [
             PICK.0 + PICK.1,
@@ -128,10 +153,25 @@ mod tests {
             last_bar,
             BODY.0 + BODY.1,
         ] {
-            assert!(done <= END, "{done} ends after END");
+            assert!(done <= BASE + 1e-9, "{done} ends after BASE");
         }
         // The name is fully in before it starts to leave, and nearly gone before the pick moves off.
-        assert!(NAME_IN.0 + NAME_IN.1 < NAME_OUT.0);
+        assert!(NAME_IN.0 + NAME_IN.1 <= NAME_OUT.0);
         assert!(step(NAME_OUT, GLIDE.0, EASE_OUT) > 0.9);
+    }
+
+    #[test]
+    fn the_length_setting_holds_the_name_or_speeds_everything_up() {
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() < 1e-9);
+        // 2.5 s: on the base timeline until the name is in, then 0.6 s held on it, then the rest.
+        assert!(close(at(0.5, 2.5), 0.5));
+        assert!(close(at(1.5, 2.5), NAME_SHOWN), "holding the name");
+        assert!(close(at(2.0, 2.5), 1.4));
+        assert_eq!(at(2.5, 2.5), None, "over at exactly its length");
+        // 1.5 s is shorter than the base timeline: everything plays faster, in the same order.
+        assert!(close(at(0.75, 1.5), 0.95));
+        assert_eq!(at(1.5, 1.5), None);
+        // The glide always starts so the title bar comes back while the app settles in.
+        assert!(at(2.49, 2.5).is_some_and(gliding) && !at(1.0, 2.5).is_some_and(gliding));
     }
 }

@@ -4,7 +4,11 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.5.1.2:** the intro is 3 seconds. The pick and its bars arrive as quickly as before; "GigEyes" now stays under it for about a second longer, then the pick glides into the header at a calmer pace. Click or press any key to skip it, or set it to play only after updates in **Settings → Startup**.
+**New in 0.5.2:**
+- **No title bar during the intro.** GigEyes opens as a plain dark window with just the logo; the title bar comes back as the logo glides into the header.
+- **Intro settings.** **Settings → Startup** now has **Off**, **Every launch** or **After updates**, and a **Length** slider from 1.5 to 4 seconds (2.5 s by default). Longer keeps "GigEyes" on screen longer; shorter than 1.9 s plays the whole intro faster. **Play it now** tries your choice.
+
+**In 0.5.1.2:** the intro is 3 seconds. The pick and its bars arrive as quickly as before; "GigEyes" now stays under it for about a second longer, then the pick glides into the header at a calmer pace. Click or press any key to skip it, or set it to play only after updates in **Settings → Startup**.
 
 **In 0.5.1.1:** the intro takes a moment longer (1.6 seconds): once the pick has formed, "GigEyes" fades in underneath it, holds, and fades away before the pick glides into the header.
 
