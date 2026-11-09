@@ -10,6 +10,7 @@ Pre-alpha. What works today:
 
 - **Tone analysis:** drop in a song, an isolated guitar track or a video link. GigEyes sums the tone up in one line, shows where an amp's Gain, Bass, Middle, Treble and Presence knobs would sit, and draws the EQ curve.
 - **Your rig:** GigEyes finds the VST3 plugins on your PC (it reads their names from disk and never loads them) and you tick the ones you play through.
+- **Plugin knowledge:** for the plugins it knows, GigEyes shows which real amps, cabinets and pedals they model, taken from each maker's own model list and linked to it. When the AI finds gear on a song's pages, each piece shows which of your ticked plugins model it, e.g. "In your rig: Helix Native (Cali Rectifire)". It knows Line 6 Helix Native, IK AmpliTube 5 (its licensed Fender, Mesa/Boogie, Orange, Fulltone, T-Rex, Dr. Z and Jet City models), Universal Audio and Plugin Alliance amps (Marshall, Fender, Ampeg, ENGL, Diezel, Friedman, Fuchs, Suhr and more), Softube Amp Room's Marshall suite, Neural DSP's licensed suites (Mesa/Boogie Mark IIC+, Soldano, Fortin, Morgan, Tone King, Omega) and TSE 808. Plugins whose makers don't say what they model, like Neural DSP's Archetypes, aren't guessed at.
 - **Song research:** with your own free search key, GigEyes finds interviews, rig rundowns and gear lists for the song, each linked so you can check it, and saves them so they open offline later.
 - **AI reading:** a local AI reads the pages research found and lists the gear and any published settings, each with the sentence it came from and a link to the page. It runs on your PC, nothing is sent anywhere, and anything it can't back with a sentence that's really on the page is dropped.
 - **Local AI choice:** GigEyes reads your graphics card and memory and picks the biggest local model that still leaves room for Gig Performer. The setup offers to download it (untick to skip), or get it later in **Settings → Local AI**.
@@ -17,10 +18,9 @@ Pre-alpha. What works today:
 
 Coming next, in order:
 
-1. Plugin knowledge: what real amps and pedals each popular plugin models, taken from the makers' own documentation
-2. Recommendations: which of your plugins for each stage and where to set each knob, saying which numbers come from a source and which from the audio
-3. Automatic tuning: GigEyes runs a dry recording of your guitar through your plugins, tunes the knobs and saves standard `.vstpreset` files any host can load
-4. Tone Library, fully offline
+1. Recommendations: which of your plugins for each stage and where to set each knob, saying which numbers come from a source and which from the audio
+2. Automatic tuning: GigEyes runs a dry recording of your guitar through your plugins, tunes the knobs and saves standard `.vstpreset` files any host can load
+3. Tone Library, fully offline
 
 ## Requirements
 

@@ -7,6 +7,7 @@ mod decode;
 mod fetch;
 mod hardware;
 mod intro;
+mod knowledge;
 mod look;
 mod model;
 mod research;
@@ -491,6 +492,9 @@ impl App {
                     .italics()
                     .weak(),
             );
+            if let Some(yours) = in_your_rig(&f.gear, &f.kind, self.rig.as_deref()) {
+                ui.label(RichText::new(yours).size(13.0).color(ink()));
+            }
             let domain = f
                 .url
                 .split('/')
@@ -655,10 +659,28 @@ impl App {
                             .into_iter()
                             .filter(|s| !s.is_empty())
                             .collect();
-                        let detail = (!about.is_empty())
-                            .then(|| RichText::new(about.join(" · ")).size(13.0).weak());
+                        let known = knowledge::about(&plugin.name);
+                        let models = models_line(&known);
+                        let detail = [about.join(" · "), models]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let detail =
+                            (!detail.is_empty()).then(|| RichText::new(detail).size(13.0).weak());
                         changed |=
                             tick(ui, &mut plugin.owned, semibold(&plugin.name, 15.0), detail);
+                        for entry in known {
+                            ui.horizontal(|ui| {
+                                ui.add_space(34.0); // under the name, past the tick box
+                                ui.hyperlink_to(
+                                    RichText::new(format!("Source: {}", entry.maker))
+                                        .size(12.0)
+                                        .color(ui.visuals().hyperlink_color),
+                                    &entry.source,
+                                );
+                            });
+                        }
                     }
                     if shown == 0 {
                         ui.label(RichText::new("No plugin or maker matches that.").weak());
@@ -1076,6 +1098,62 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
 }
 
 /// Search excerpts can run long; keep a readable two or three lines.
+/// "Models the Mesa/Boogie Mark IIC+", or how many models and a few of them, for a plugin GigEyes knows.
+fn models_line(known: &[&knowledge::Entry]) -> String {
+    let mut real: Vec<&str> = vec![];
+    for model in known.iter().flat_map(|e| &e.models) {
+        let name = model.real.split('(').next().unwrap_or_default().trim();
+        if !real.contains(&name) {
+            real.push(name);
+        }
+    }
+    match real.as_slice() {
+        [] => String::new(),
+        [one] => format!("Models the {one}"),
+        few if few.len() <= 4 => format!(
+            "Models the {} and {}",
+            few[..few.len() - 1].join(", "),
+            few[few.len() - 1]
+        ),
+        many => format!(
+            "Models {} pieces of real gear, including the {}, {} and {}",
+            many.len(),
+            many[0],
+            many[1],
+            many[2]
+        ),
+    }
+}
+
+/// "In your rig: Helix Native (Brit 2203), Amp Room (Marshall JCM800) and 1 more" when ticked
+/// plugins model this gear.
+fn in_your_rig(gear: &str, kind: &str, rig: Option<&[rig::Plugin]>) -> Option<String> {
+    let matches = knowledge::who_models(gear, kind, rig?);
+    let named: Vec<String> = matches
+        .iter()
+        .take(3)
+        .map(|m| {
+            if knowledge::about(m.plugin)
+                .iter()
+                .all(|e| e.models.len() == 1)
+            {
+                m.plugin.to_string() // a plugin that is that one amp
+            } else {
+                format!("{} ({})", m.plugin, m.model.model)
+            }
+        })
+        .collect();
+    let more = matches.len().saturating_sub(named.len());
+    (!named.is_empty()).then(|| {
+        let more = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        format!("In your rig: {}{more}", named.join(", "))
+    })
+}
+
 fn snippet(text: &str) -> String {
     let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= 260 {

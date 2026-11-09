@@ -4,7 +4,12 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.5.2:**
+**New in 0.6: plugin knowledge**
+- **Your rig** now shows, for each plugin GigEyes knows, which real amps, cabinets and pedals it models, with a link to the maker's own list it comes from.
+- **Gear on these pages:** each piece of gear the AI finds now shows which of your ticked plugins model it, e.g. "In your rig: Helix Native (Cali Rectifire), Mesa Boogie Mark IIC+ Suite".
+- Known so far: Line 6 Helix Native (330 models), IK AmpliTube 5's licensed models (Fender, Mesa/Boogie, Orange, Fulltone, T-Rex, Dr. Z, Jet City), the Universal Audio and Plugin Alliance amps (Marshall, Fender, Ampeg, ENGL, Diezel, Friedman, Fuchs, Suhr and more), Softube Amp Room's Marshall suite, Neural DSP's licensed suites (Mesa/Boogie Mark IIC+, Soldano SLO-100, Fortin, Morgan, Tone King, Omega Granophyre) and TSE 808. Plugins whose makers don't say what they model aren't guessed at.
+
+**In 0.5.2:**
 - **No title bar during the intro.** GigEyes opens as a plain dark window with just the logo; the title bar comes back as the logo glides into the header.
 - **Intro settings.** **Settings → Startup** now has **Off**, **Every launch** or **After updates**, and a **Length** slider from 1.5 to 4 seconds (2.5 s by default). Longer keeps "GigEyes" on screen longer; shorter than 1.9 s plays the whole intro faster. **Play it now** tries your choice.
 
