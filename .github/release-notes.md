@@ -4,7 +4,13 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.6: plugin knowledge**
+**New in 0.7: GigEyes learns your own plugins**
+- **First-start setup.** GigEyes opens with five short steps: appearance, your guitar, your plugins, the search key and the local AI. Every step can be skipped, and **Settings → First-start setup → Run it again** goes through it again. If you're updating, it opens once now.
+- **Your rig has two columns:** **Use** (you play through it) and **Look up** (find out what real gear it models). Looking up searches the web with your Tavily key and the local AI reads the pages; what it finds stays on your PC, marked "found on the web", each model with the sentence it came from and a link. A wrong one can be removed, and any plugin can be looked up again. Lookups run in the background (one search per plugin) and **Stop** pauses them.
+- **New plugins.** GigEyes rescans at every start. In **Auto config** it asks about each new plugin: Yes ticks both columns and looks it up. In **Manual** new plugins appear unticked.
+- The built-in list from 0.6 is gone: every plugin is now looked up the same way, including ones the list didn't know.
+
+**In 0.6: plugin knowledge**
 - **Your rig** now shows, for each plugin GigEyes knows, which real amps, cabinets and pedals it models, with a link to the maker's own list it comes from.
 - **Gear on these pages:** each piece of gear the AI finds now shows which of your ticked plugins model it, e.g. "In your rig: Helix Native (Cali Rectifire), Mesa Boogie Mark IIC+ Suite".
 - Known so far: Line 6 Helix Native (330 models), IK AmpliTube 5's licensed models (Fender, Mesa/Boogie, Orange, Fulltone, T-Rex, Dr. Z, Jet City), the Universal Audio and Plugin Alliance amps (Marshall, Fender, Ampeg, ENGL, Diezel, Friedman, Fuchs, Suhr and more), Softube Amp Room's Marshall suite, Neural DSP's licensed suites (Mesa/Boogie Mark IIC+, Soldano SLO-100, Fortin, Morgan, Tone King, Omega Granophyre) and TSE 808. Plugins whose makers don't say what they model aren't guessed at.

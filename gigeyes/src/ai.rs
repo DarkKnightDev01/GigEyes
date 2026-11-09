@@ -25,6 +25,18 @@ pub struct Finding {
     /// The page it came from; filled in by GigEyes, not the AI.
     #[serde(default)]
     pub url: String,
+    /// For a plugin: the plugin's own name for this model, e.g. "Cali Rectifire"; may be empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub model: String,
+}
+
+/// What the AI is reading the pages for.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Task {
+    /// The gear used on a song: `Research::song` is the song.
+    Song,
+    /// The real gear a plugin models: `Research::song` is the plugin's name.
+    Plugin,
 }
 
 pub const STOPPED: &str = "Stopped.";
@@ -37,12 +49,21 @@ For each piece of gear give:\n\
 - quote: one sentence copied word for word from the page that names this gear. Never reword, shorten or fix it.\n\
 Leave out gear the page doesn't tie to this song, album or tour, gear used only by the bass player, singer or drummer, and anything you aren't sure the page says. If the page names no gear, return an empty list.";
 
+const PLUGIN_PROMPT: &str = "You read one web page about an audio plugin. List the real-world amps, cabinets, pedals and effects the page says this plugin models, emulates or is based on.\n\
+For each one give:\n\
+- gear: the real unit's make and model as the page writes them, e.g. \"Mesa/Boogie Dual Rectifier\", not the plugin's own name for it\n\
+- kind: amp, cabinet, pedal or effect\n\
+- model: the plugin's own name for that model if the page gives one, otherwise an empty string\n\
+- quote: one sentence copied word for word from the page that names the real unit. Never reword, shorten or fix it.\n\
+Leave out gear the page doesn't say this plugin models, other products, and anything you aren't sure the page says. If the page names none, return an empty list.";
+
 /// Starts the server, reads every page that has text, and stops the server again.
 /// `page` is set to the page being read (0 while the model loads). Setting `cancel` stops at once.
 pub fn read(
     model: &Model,
     gpu: bool,
     research: &Research,
+    task: Task,
     page: &AtomicUsize,
     cancel: &AtomicBool,
 ) -> Result<Vec<Finding>, String> {
@@ -60,7 +81,7 @@ pub fn read(
             }
         });
         let result = wait_ready(&server, cancel)
-            .and_then(|()| read_pages(&server.base, research, page, cancel));
+            .and_then(|()| read_pages(&server.base, research, task, page, cancel));
         done.store(true, Ordering::Relaxed);
         result
     })
@@ -165,6 +186,7 @@ fn wait_ready(server: &Server, cancel: &AtomicBool) -> Result<(), String> {
 fn read_pages(
     base: &str,
     research: &Research,
+    task: Task,
     page: &AtomicUsize,
     cancel: &AtomicBool,
 ) -> Result<Vec<Finding>, String> {
@@ -182,7 +204,7 @@ fn read_pages(
     let mut failed = 0;
     for (i, source) in pages.iter().enumerate() {
         page.store(i + 1, Ordering::Relaxed);
-        match ask(&agent, base, &research.song, source) {
+        match ask(&agent, base, &research.song, task, source) {
             Ok(list) => {
                 let text = norm(&source.text);
                 for finding in list {
@@ -209,31 +231,54 @@ fn read_pages(
 fn ask(
     agent: &ureq::Agent,
     base: &str,
-    song: &str,
+    subject: &str,
+    task: Task,
     source: &Source,
 ) -> Result<Vec<Finding>, String> {
     // The server only lets the model write JSON of this shape.
+    let (prompt, label, kinds, detail, max, tokens) = match task {
+        Task::Song => (
+            PROMPT,
+            "Song",
+            &[
+                "guitar", "pickups", "amp", "cabinet", "pedal", "effect", "strings", "tuning",
+                "other",
+            ][..],
+            "settings",
+            15,
+            1500,
+        ),
+        // A suite's model list can be long: room for 60 models.
+        Task::Plugin => (
+            PLUGIN_PROMPT,
+            "Plugin",
+            &["amp", "cabinet", "pedal", "effect"][..],
+            "model",
+            60,
+            4000,
+        ),
+    };
     let schema = serde_json::json!({
         "type": "object",
-        "properties": {"found": {"type": "array", "maxItems": 15, "items": {
+        "properties": {"found": {"type": "array", "maxItems": max, "items": {
             "type": "object",
             "properties": {
                 "gear": {"type": "string"},
-                "kind": {"type": "string", "enum": ["guitar", "pickups", "amp", "cabinet", "pedal", "effect", "strings", "tuning", "other"]},
-                "settings": {"type": "string"},
+                "kind": {"type": "string", "enum": kinds},
+                detail: {"type": "string"},
                 "quote": {"type": "string"}
             },
-            "required": ["gear", "kind", "settings", "quote"]
+            "required": ["gear", "kind", detail, "quote"]
         }}},
         "required": ["found"]
     });
     let body = serde_json::json!({
         "messages": [
-            {"role": "system", "content": PROMPT},
-            {"role": "user", "content": format!("Song: {song}\nPage: {}\n\n{}", source.title, source.text)},
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": format!("{label}: {subject}\nPage: {}\n\n{}", source.title, source.text)},
         ],
         "temperature": 0.2,
-        "max_tokens": 1500,
+        "max_tokens": tokens,
         "response_format": {"type": "json_object", "schema": schema},
         "chat_template_kwargs": {"enable_thinking": false},
     });
@@ -303,6 +348,7 @@ mod tests {
             settings: String::new(),
             quote: quote.into(),
             url: String::new(),
+            model: String::new(),
         }
     }
 
@@ -422,7 +468,8 @@ mod tests {
             findings: None,
         };
         let page = AtomicUsize::new(0);
-        let found = read_pages(&base, &research, &page, &AtomicBool::new(false)).unwrap();
+        let found =
+            read_pages(&base, &research, Task::Song, &page, &AtomicBool::new(false)).unwrap();
         assert_eq!(found.len(), 1, "the Klon quote isn't on the page");
         assert_eq!(
             (found[0].settings.as_str(), found[0].url.as_str()),
@@ -438,6 +485,48 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("Song: Band - Song")
+        );
+    }
+
+    #[test]
+    fn a_plugin_lookup_asks_for_models_and_keeps_their_plugin_names() {
+        let (base, server) = fake_server(vec![
+            r#"{"found":[
+                {"gear":"Mesa/Boogie Dual Rectifier","kind":"amp","model":"Cali Rectifire","quote":"Cali Rectifire is based on a Mesa/Boogie Dual Rectifier."},
+                {"gear":"Marshall JCM800","kind":"amp","model":"","quote":"It also has a Marshall JCM800."}]}"#,
+        ]);
+        let research = Research {
+            song: "Helix Native".into(),
+            sources: vec![source(
+                "https://line6.com/helix-models/",
+                "Models. Cali Rectifire is based on a Mesa/Boogie Dual Rectifier. More amps.",
+            )],
+            searched_at: 0,
+            findings: None,
+        };
+        let page = AtomicUsize::new(0);
+        let found = read_pages(
+            &base,
+            &research,
+            Task::Plugin,
+            &page,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(found.len(), 1, "the JCM800 sentence isn't on the page");
+        assert_eq!(
+            (found[0].gear.as_str(), found[0].model.as_str()),
+            ("Mesa/Boogie Dual Rectifier", "Cali Rectifire")
+        );
+        let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        let user = request["messages"][1]["content"].as_str().unwrap();
+        assert!(user.starts_with("Plugin: Helix Native"), "{user}");
+        let kinds = &request["response_format"]["schema"]["properties"]["found"]["items"]["properties"]
+            ["kind"]["enum"];
+        assert_eq!(
+            kinds.as_array().unwrap().len(),
+            4,
+            "plugins model amps, cabs, pedals, effects"
         );
     }
 }

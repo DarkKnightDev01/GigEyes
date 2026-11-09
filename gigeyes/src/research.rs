@@ -102,16 +102,23 @@ struct TavilyResult {
 }
 
 pub fn search(key: &str, song: &str) -> Result<Research, String> {
-    search_at(TAVILY, key, song)
-}
-
-fn search_at(base: &str, key: &str, song: &str) -> Result<Research, String> {
     let song = song.trim();
     if song.is_empty() {
         return Err("Type the artist and song first.".into());
     }
+    search_at(TAVILY, key, song, &query_for(song))
+}
+
+/// Pages on what a plugin models: its maker's page and model lists. `subject` in the result is the
+/// plugin's name.
+pub fn search_plugin(key: &str, name: &str, vendor: &str) -> Result<Research, String> {
+    let query = format!("\"{name}\" {vendor} plugin amp models based on");
+    search_at(TAVILY, key, name, &query)
+}
+
+fn search_at(base: &str, key: &str, subject: &str, query: &str) -> Result<Research, String> {
     let body = serde_json::json!({
-        "query": query_for(song),
+        "query": query,
         "search_depth": "basic",
         "max_results": 8,
         "include_raw_content": "text",
@@ -155,7 +162,7 @@ fn search_at(base: &str, key: &str, song: &str) -> Result<Research, String> {
         .unwrap_or_default()
         .as_secs();
     Ok(Research {
-        song: song.to_string(),
+        song: subject.to_string(),
         sources,
         searched_at,
         findings: None,
@@ -230,6 +237,21 @@ pub struct Settings {
     pub intro_seen: String,
     /// How long the intro lasts, in seconds (1.5 to 4).
     pub intro_length: f32,
+    /// The first-start setup is done (Settings can run it again).
+    pub onboarded: bool,
+    /// The guitar the user plays, as they wrote it.
+    pub guitar: String,
+    /// What happens when a new plugin appears on this PC.
+    pub new_plugins: NewPlugins,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+pub enum NewPlugins {
+    /// GigEyes asks whether you use it; yes ticks it and looks it up.
+    #[default]
+    Auto,
+    /// New plugins appear unticked and nothing happens until you tick them.
+    Manual,
 }
 
 impl Default for Settings {
@@ -240,6 +262,9 @@ impl Default for Settings {
             intro: Intro::default(),
             intro_seen: String::new(),
             intro_length: 2.5,
+            onboarded: false,
+            guitar: String::new(),
+            new_plugins: NewPlugins::default(),
         }
     }
 }
@@ -377,7 +402,13 @@ mod tests {
             "200 OK",
             r#"{"query":"q","results":[{"title":"Rig Rundown","url":"https://example.com/rig","content":"He used a 5150.","score":0.9,"raw_content":"Full page text"},{"title":"Bad","url":"file:///C:/Windows/notepad.exe","content":"x","score":0.1}]}"#,
         );
-        let research = search_at(&base, " tvly-test ", "Gojira - Stranded").unwrap();
+        let research = search_at(
+            &base,
+            " tvly-test ",
+            "Gojira - Stranded",
+            &query_for("Gojira - Stranded"),
+        )
+        .unwrap();
         assert_eq!(research.sources.len(), 1, "the file: link is dropped");
         let request = server.join().unwrap();
         assert!(
@@ -392,7 +423,7 @@ mod tests {
     #[test]
     fn a_bad_key_gets_a_plain_message() {
         let (base, server) = fake_tavily("401 Unauthorized", r#"{"detail":"invalid"}"#);
-        let err = search_at(&base, "nope", "Some Song").unwrap_err();
+        let err = search_at(&base, "nope", "Some Song", &query_for("Some Song")).unwrap_err();
         server.join().unwrap();
         assert!(err.starts_with("Tavily didn't accept that key"), "{err}");
     }

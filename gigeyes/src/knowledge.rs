@@ -1,89 +1,181 @@
-//! Plugin knowledge: which real amps, cabinets and pedals each known plugin models, taken from the
-//! makers' own pages (data/plugins.json, built into the app, every entry with its source). Used to
-//! show what a plugin in your rig models, and which of your plugins model the gear a song used.
+//! Plugin knowledge: which real amps, cabinets and pedals each of your plugins models. GigEyes looks
+//! a plugin up on the web and the local AI reads the pages (`ai::Task::Plugin`); what it finds is kept
+//! in `%APPDATA%\GigEyes\knowledge.json`, so it works offline from then on. Every model keeps the
+//! sentence and page it came from, and a wrong one can be removed.
 
+use crate::ai::Finding;
 use crate::rig::Plugin;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::OnceLock;
+use std::path::PathBuf;
 
-#[derive(Deserialize)]
-pub struct Entry {
-    /// Names the plugin goes by; a plugin on disk matches when its name contains one of them.
-    pub names: Vec<String>,
-    pub maker: String,
-    /// The maker's page the models come from.
-    pub source: String,
-    pub models: Vec<Model>,
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct Knowledge {
+    pub plugins: Vec<Known>,
 }
 
-#[derive(Deserialize)]
-pub struct Model {
-    /// What the plugin calls it, e.g. "Cali Rectifire".
-    pub model: String,
-    /// amp, cabinet, pedal or effect.
-    pub kind: String,
-    /// The real gear, as the maker names it, e.g. "MESA/Boogie Dual Rectifier".
-    pub real: String,
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Known {
+    /// The plugin's name as the scan found it.
+    pub plugin: String,
+    /// Unix seconds when it was looked up.
+    pub looked_up_at: u64,
+    /// `gear` is the real unit, `model` the plugin's own name for it, `quote` and `url` the proof.
+    pub models: Vec<Finding>,
 }
 
-#[derive(Deserialize)]
-struct File {
-    plugins: Vec<Entry>,
+/// Gear makers, so "Marshall" in front of a model is read as the maker, not as part of the model.
+/// Makers named in looked-up models are added to these.
+const MAKERS: [&str; 64] = [
+    "marshall",
+    "fender",
+    "mesa",
+    "vox",
+    "orange",
+    "peavey",
+    "evh",
+    "engl",
+    "diezel",
+    "friedman",
+    "soldano",
+    "bogner",
+    "hiwatt",
+    "laney",
+    "randall",
+    "ampeg",
+    "gibson",
+    "supro",
+    "dumble",
+    "matchless",
+    "dr",
+    "victoria",
+    "suhr",
+    "fuchs",
+    "revv",
+    "kemper",
+    "krank",
+    "splawn",
+    "jet",
+    "carvin",
+    "rivera",
+    "budda",
+    "morgan",
+    "fortin",
+    "omega",
+    "darkglass",
+    "boss",
+    "ibanez",
+    "maxon",
+    "mxr",
+    "dunlop",
+    "electroharmonix",
+    "ehx",
+    "proco",
+    "fulltone",
+    "klon",
+    "tc",
+    "strymon",
+    "eventide",
+    "walrus",
+    "jhs",
+    "keeley",
+    "analogman",
+    "zvex",
+    "digitech",
+    "roland",
+    "yamaha",
+    "korg",
+    "tech",
+    "line",
+    "celestion",
+    "eminence",
+    "jensen",
+    "electrovoice",
+];
+
+fn file() -> Option<PathBuf> {
+    crate::research::data_dir().map(|d| d.join("knowledge.json"))
 }
 
-struct Db {
-    entries: Vec<Entry>,
-    /// Words that name a maker (the first word of each real name), left out when comparing models.
-    brands: HashSet<String>,
-}
+impl Knowledge {
+    /// What was looked up before, or nothing yet.
+    pub fn load() -> Knowledge {
+        file()
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
 
-fn db() -> &'static Db {
-    static DB: OnceLock<Db> = OnceLock::new();
-    DB.get_or_init(|| {
-        let file: File = serde_json::from_str(include_str!("../data/plugins.json"))
-            .expect("data/plugins.json is checked by the tests");
-        let brands = file
+    pub fn save(&self) -> Result<(), String> {
+        let file = file().ok_or("Can't find a settings folder on this PC.")?;
+        std::fs::create_dir_all(file.parent().expect("knowledge file has a folder"))
+            .and_then(|_| {
+                crate::research::write_atomic(
+                    &file,
+                    &serde_json::to_string_pretty(self).expect("knowledge serialises"),
+                )
+            })
+            .map_err(|e| format!("Couldn't save what GigEyes found out: {e}"))
+    }
+
+    /// What was found out about `plugin`, if it was looked up.
+    pub fn about(&self, plugin: &str) -> Option<&Known> {
+        self.plugins.iter().find(|k| k.plugin == plugin)
+    }
+
+    /// Keep what a lookup of `plugin` found, replacing an earlier lookup.
+    pub fn set(&mut self, plugin: &str, models: Vec<Finding>) {
+        let looked_up_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.plugins.retain(|k| k.plugin != plugin);
+        self.plugins.push(Known {
+            plugin: plugin.to_string(),
+            looked_up_at,
+            models,
+        });
+    }
+
+    /// Take a model the lookup got wrong off `plugin`.
+    pub fn remove_model(&mut self, plugin: &str, index: usize) {
+        if let Some(known) = self.plugins.iter_mut().find(|k| k.plugin == plugin)
+            && index < known.models.len()
+        {
+            known.models.remove(index);
+        }
+    }
+
+    fn makers(&self) -> HashSet<String> {
+        let found = self
             .plugins
             .iter()
-            .flat_map(|e| &e.models)
-            .filter_map(|m| words(&m.real).into_iter().next())
-            .filter(|w| !w.chars().any(|c| c.is_ascii_digit()) && !GENERIC.contains(&w.as_str()))
-            .collect();
-        Db {
-            entries: file.plugins,
-            brands,
-        }
-    })
-}
+            .flat_map(|k| &k.models)
+            .filter_map(|m| words(&m.gear).into_iter().next())
+            .filter(|w| !w.chars().any(|c| c.is_ascii_digit()) && !GENERIC.contains(&w.as_str()));
+        MAKERS.iter().map(|m| m.to_string()).chain(found).collect()
+    }
 
-/// What GigEyes knows about `plugin`: every entry whose name it carries.
-pub fn about(plugin: &str) -> Vec<&'static Entry> {
-    let name = squash(plugin);
-    db().entries
-        .iter()
-        .filter(|e| e.names.iter().any(|n| name.contains(&squash(n))))
-        .collect()
-}
-
-/// A model in one of your plugins that matches a piece of gear.
-pub struct Match<'a> {
-    pub plugin: &'a str,
-    pub model: &'static Model,
-}
-
-/// Which of `plugins` (only the ticked ones) model `gear`, a name from a page, of `kind` (the AI's
-/// guitar/pickups/amp/cabinet/pedal/effect/strings/tuning/other).
-pub fn who_models<'a>(gear: &str, kind: &str, plugins: &'a [Plugin]) -> Vec<Match<'a>> {
-    let mut found: Vec<Match> = vec![];
-    for plugin in plugins.iter().filter(|p| p.owned) {
-        for entry in about(&plugin.name) {
-            for model in &entry.models {
+    /// Which of `plugins` (only the ticked ones) model `gear`, a name from a page, of `kind` (the
+    /// AI's guitar/pickups/amp/cabinet/pedal/effect/strings/tuning/other).
+    pub fn who_models<'a>(
+        &'a self,
+        gear: &str,
+        kind: &str,
+        plugins: &'a [Plugin],
+    ) -> Vec<Match<'a>> {
+        let makers = self.makers();
+        let mut found: Vec<Match> = vec![];
+        for plugin in plugins.iter().filter(|p| p.owned) {
+            let Some(known) = self.about(&plugin.name) else {
+                continue;
+            };
+            for model in &known.models {
                 if kinds_fit(kind, &model.kind)
-                    && same_gear(gear, &model.real)
+                    && same_gear(&makers, gear, &model.gear)
                     && !found
                         .iter()
-                        .any(|f| f.plugin == plugin.name && f.model.real == model.real)
+                        .any(|f| f.plugin == plugin.name && f.model.gear == model.gear)
                 {
                     found.push(Match {
                         plugin: &plugin.name,
@@ -92,8 +184,14 @@ pub fn who_models<'a>(gear: &str, kind: &str, plugins: &'a [Plugin]) -> Vec<Matc
                 }
             }
         }
+        found
     }
-    found
+}
+
+/// A model in one of your plugins that matches a piece of gear.
+pub struct Match<'a> {
+    pub plugin: &'a str,
+    pub model: &'a Finding,
 }
 
 fn kinds_fit(found: &str, model: &str) -> bool {
@@ -153,8 +251,7 @@ const GENERIC: [&str; 40] = [
 /// the model words of one are named in the other, e.g. "Dual Rectifier" in "Mesa/Boogie Dual
 /// Rectifier 3-channel", or "Tube Screamer" in "Ibanez TS808 Tube Screamer". Two different makers
 /// in front never match: a Peavey 5150 isn't an EVH 5150III.
-fn same_gear(gear: &str, real: &str) -> bool {
-    let brands = &db().brands;
+fn same_gear(brands: &HashSet<String>, gear: &str, real: &str) -> bool {
     let real = real.split('(').next().unwrap_or_default(); // "(bright channel)" and the like
     let (real_words, gear_words) = (words(real), words(gear));
     let maker = |w: &[String]| w.iter().take_while(|w| brands.contains(*w)).count();
@@ -213,14 +310,6 @@ fn words(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// A name with only its letters and digits, for comparing plugin names written different ways.
-fn squash(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,47 +321,56 @@ mod tests {
             vendor: String::new(),
             kind: String::new(),
             owned: true,
+            lookup: true,
         }
     }
 
-    #[test]
-    fn every_entry_is_complete_and_sourced() {
-        let kinds = ["amp", "cabinet", "pedal", "effect"];
-        for e in &db().entries {
-            assert!(!e.names.is_empty() && !e.maker.is_empty(), "{:?}", e.names);
-            assert!(
-                e.source.starts_with("https://"),
-                "{} needs a source",
-                e.names[0]
-            );
-            for m in &e.models {
-                assert!(
-                    kinds.contains(&m.kind.as_str()),
-                    "{}: kind {}",
-                    m.model,
-                    m.kind
-                );
-                assert!(!m.real.trim().is_empty(), "{} has no real gear", m.model);
-            }
+    fn model(gear: &str, kind: &str, name: &str) -> Finding {
+        Finding {
+            gear: gear.into(),
+            kind: kind.into(),
+            settings: String::new(),
+            quote: format!("It models the {gear}."),
+            url: "https://example.com".into(),
+            model: name.into(),
         }
     }
 
-    #[test]
-    fn plugin_names_match_however_they_are_written() {
-        assert_eq!(about("Helix Native").len(), 1);
-        assert_eq!(
-            about("UADx Marshall Plexi Super Lead 1959 Amp")[0].maker,
-            "Universal Audio"
+    /// What lookups of a few plugins might have found.
+    fn looked_up() -> Knowledge {
+        let mut k = Knowledge::default();
+        k.set(
+            "Helix Native",
+            vec![
+                model("MESA/Boogie Dual Rectifier", "amp", "Cali Rectifire"),
+                model("MESA/Boogie Mark IV (lead channel)", "amp", "Cali IV Lead"),
+                model("Peavey 5150", "amp", "PV Panama"),
+                model("EVH 5150III 100 Blue channel", "amp", "EV Panama Blue"),
+                model("Ibanez TS808 Tube Screamer", "pedal", "Scream 808"),
+                model("BOSS DS-1 Distortion", "pedal", "Deez One Vintage"),
+                model(
+                    "Soldano SLO-100 (crunch channel)",
+                    "amp",
+                    "Solo Lead Crunch",
+                ),
+                model("Marshall JCM-800 (100 watt)", "amp", "Brit 2203"),
+            ],
         );
-        assert_eq!(about("Fortin Nameless Suite X")[0].maker, "Neural DSP");
-        assert!(
-            about("Archetype: Gojira X").is_empty(),
-            "not in the list: its page names no amps"
+        k.set(
+            "Mesa Boogie Mark IIC+ Suite",
+            vec![model("Mesa/Boogie Mark IIC+", "amp", "")],
         );
+        k.set("TSE808", vec![model("Ibanez Tube Screamer", "pedal", "")]);
+        k.set(
+            "AmpliTube 5",
+            vec![model("Mesa/Boogie Mark IIC+", "amp", "Mark IIC+")],
+        );
+        k
     }
 
     #[test]
     fn gear_from_a_page_finds_the_plugins_that_model_it() {
+        let k = looked_up();
         let rig = [
             plugin("Helix Native"),
             plugin("Mesa Boogie Mark IIC+ Suite"),
@@ -283,32 +381,38 @@ mod tests {
             },
         ];
         let names = |gear: &str, kind: &str| -> Vec<String> {
-            who_models(gear, kind, &rig)
+            k.who_models(gear, kind, &rig)
                 .iter()
-                .map(|m| format!("{}: {}", m.plugin, m.model.model))
+                .map(|m| format!("{}: {}", m.plugin, m.model.gear))
                 .collect()
         };
         let iic = names("Mesa/Boogie Mark IIC+", "amp");
-        assert!(
-            iic.contains(&"Mesa Boogie Mark IIC+ Suite: Mark IIC+".to_string()),
-            "{iic:?}"
-        );
-        assert!(
-            !iic.iter().any(|n| n.contains("AmpliTube")),
-            "unticked plugins stay out"
-        );
-        assert!(
-            !iic.iter().any(|n| n.contains("Cali IV")),
-            "a Mark IV isn't a Mark IIC+: {iic:?}"
+        assert_eq!(
+            iic,
+            ["Mesa Boogie Mark IIC+ Suite: Mesa/Boogie Mark IIC+"],
+            "unticked AmpliTube and the Mark IV stay out"
         );
 
         let ts = names("Ibanez Tube Screamer", "pedal");
-        assert!(ts.contains(&"TSE808: TSE 808".to_string()), "{ts:?}");
+        assert!(ts.iter().any(|n| n.starts_with("TSE808")), "{ts:?}");
         assert!(ts.iter().any(|n| n.starts_with("Helix Native")), "{ts:?}");
 
         assert!(
             !names("Boss DS-1", "pedal").is_empty(),
             "short model names still match"
+        );
+        assert_eq!(
+            names("Marshall JCM 800", "amp"),
+            ["Helix Native: Marshall JCM-800 (100 watt)"]
+        );
+        assert_eq!(
+            names("Peavey 5150", "amp"),
+            ["Helix Native: Peavey 5150"],
+            "not the EVH"
+        );
+        assert!(
+            !names("Soldano SLO", "amp").is_empty(),
+            "SLO is the start of SLO-100"
         );
         assert!(
             names("Marshall", "amp").is_empty(),
@@ -316,15 +420,30 @@ mod tests {
         );
         assert!(names("Marshall amp", "amp").is_empty());
         assert!(
-            names("Mesa/Boogie Dual Rectifier", "cabinet").is_empty() || {
-                who_models("Mesa/Boogie Dual Rectifier", "cabinet", &rig)
-                    .iter()
-                    .all(|m| m.model.kind == "cabinet")
-            }
+            names("Mesa/Boogie Dual Rectifier", "cabinet").is_empty(),
+            "an amp isn't a cab"
         );
         assert!(
             names("Gibson Les Paul", "guitar").is_empty(),
             "guitars aren't plugins"
         );
+    }
+
+    #[test]
+    fn lookups_replace_earlier_ones_and_wrong_models_can_be_removed() {
+        let mut k = looked_up();
+        k.set("TSE808", vec![]);
+        assert_eq!(k.about("TSE808").unwrap().models.len(), 0);
+        assert_eq!(k.plugins.iter().filter(|p| p.plugin == "TSE808").count(), 1);
+        k.remove_model("Helix Native", 0);
+        assert_eq!(
+            k.about("Helix Native").unwrap().models[0].model,
+            "Cali IV Lead"
+        );
+        k.remove_model("Helix Native", 99); // out of range: nothing happens
+        assert!(k.about("Nothing").is_none());
+        // A file from before still loads; a missing field doesn't lose the rest.
+        let back: Knowledge = serde_json::from_str(&serde_json::to_string(&k).unwrap()).unwrap();
+        assert_eq!(back, k);
     }
 }

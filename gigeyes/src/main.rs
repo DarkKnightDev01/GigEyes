@@ -70,8 +70,30 @@ fn main() -> eframe::Result {
             egui_extras::install_image_loaders(&cc.egui_ctx);
             cc.egui_ctx.set_fonts(fonts());
             apply_theme(&cc.egui_ctx, settings.light);
+            // Rescan at every start, so new plugins show up; in auto config GigEyes asks about them.
+            let mut rig = rig::load();
+            let mut asking = vec![];
+            if settings.onboarded
+                && let Some(old) = &rig
+            {
+                let fresh = rig::rescan(old, &rig::default_folders());
+                if settings.new_plugins == research::NewPlugins::Auto {
+                    asking = fresh
+                        .iter()
+                        .filter(|p| !old.iter().any(|o| o.path == p.path))
+                        .map(|p| p.path.clone())
+                        .collect();
+                }
+                let _ = rig::save(&fresh);
+                rig = Some(fresh);
+            }
             let mut app = App {
-                rig: rig::load(),
+                rig,
+                asking,
+                knowledge: knowledge::Knowledge::load(),
+                onboarding: (!settings.onboarded).then_some(0),
+                guitar: settings.guitar,
+                new_plugins: settings.new_plugins,
                 tavily_key: settings.tavily_key,
                 intro_queued,
                 intro_choice: settings.intro,
@@ -142,6 +164,22 @@ struct App {
     intro_length: f32,
     /// The window has no title bar yet (only while the startup intro plays).
     bare: bool,
+    /// What lookups found out about the user's plugins, kept offline.
+    knowledge: knowledge::Knowledge,
+    /// Looking plugins up: the job, the plugin it's on (and which of how many), Stop, and per-plugin
+    /// errors this session. Stop pauses lookups until "Look up now".
+    lookup_job: Option<Receiver<Lookup>>,
+    looking_up: Option<(String, usize, usize)>,
+    lookup_cancel: Arc<AtomicBool>,
+    lookup_paused: bool,
+    lookup_failed: std::collections::HashMap<String, String>,
+    /// New plugins found at start that GigEyes still has to ask about (auto config).
+    asking: Vec<PathBuf>,
+    new_plugins: research::NewPlugins,
+    /// The first-start setup: which step, and since when it shows.
+    onboarding: Option<usize>,
+    onboarding_at: f64,
+    guitar: String,
     /// Read once, the first time the AI is needed.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
     /// The local AI reading the research pages: the page it's on (0 while it loads), Stop, and any error.
@@ -156,6 +194,16 @@ struct App {
     get_ai_cancel: Arc<AtomicBool>,
     get_ai_note: Option<String>,
 }
+
+/// What a lookup job reports back.
+enum Lookup {
+    /// Now looking up this plugin, number i of n.
+    Now(String, usize, usize),
+    Done(String, Result<Vec<ai::Finding>, String>),
+    Finished,
+}
+
+const STEPS: usize = 5;
 
 #[derive(Default, PartialEq, Clone, Copy)]
 enum Screen {
@@ -456,8 +504,16 @@ impl App {
                     }
                     ui.add_space(8.0);
                     let label = if read { "Read again" } else { "Read the pages" };
-                    if ui.button(label).clicked() {
+                    let free = self.lookup_job.is_none();
+                    if ui.add_enabled(free, egui::Button::new(label)).clicked() {
                         self.start_reading(ctx);
+                    }
+                    if !free {
+                        ui.label(
+                            RichText::new("The local AI is busy looking up your plugins. Stop that in Your rig to read now.")
+                                .size(13.0)
+                                .weak(),
+                        );
                     }
                 }
             }
@@ -492,7 +548,8 @@ impl App {
                     .italics()
                     .weak(),
             );
-            if let Some(yours) = in_your_rig(&f.gear, &f.kind, self.rig.as_deref()) {
+            if let Some(yours) = in_your_rig(&self.knowledge, &f.gear, &f.kind, self.rig.as_deref())
+            {
                 ui.label(RichText::new(yours).size(13.0).color(ink()));
             }
             let domain = f
@@ -534,7 +591,14 @@ impl App {
         let (page, cancel, ctx) = (self.ai_page.clone(), self.ai_cancel.clone(), ctx.clone());
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || {
-            let _ = tx.send(ai::read(&model, gpu, &research, &page, &cancel));
+            let _ = tx.send(ai::read(
+                &model,
+                gpu,
+                &research,
+                ai::Task::Song,
+                &page,
+                &cancel,
+            ));
             ctx.request_repaint();
         });
         self.ai_job = Some(rx);
@@ -581,10 +645,12 @@ impl App {
     fn rig_view(&mut self, ui: &mut egui::Ui) {
         ui.label(semibold("Your rig", 22.0));
         ui.label(
-            RichText::new("Tick the plugins you play through. GigEyes reads their names from disk; it never loads or changes them.")
+            RichText::new("Tick the plugins you play through, and the ones GigEyes should look up: it searches the web for the real gear each one models, the local AI reads the pages, and what it finds stays on this PC. GigEyes reads plugin names from disk; it never loads or changes them.")
                 .weak(),
         );
-        ui.add_space(16.0);
+        ui.add_space(12.0);
+        self.new_plugins_choice(ui);
+        ui.add_space(14.0);
         let mut changed = false;
         ui.horizontal(|ui| {
             let scan = egui::Button::new(semibold("Scan for plugins", 15.0).color(ON_ACCENT))
@@ -609,13 +675,56 @@ impl App {
             }
             if let Some(plugins) = &self.rig {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let ticked = plugins.iter().filter(|p| p.owned).count();
-                    ui.label(RichText::new(format!("{ticked} of {} ticked", plugins.len())).weak());
+                    let used = plugins.iter().filter(|p| p.owned).count();
+                    ui.label(RichText::new(format!("{used} of {} in use", plugins.len())).weak());
                 });
             }
         });
-        ui.add_space(16.0);
+        ui.add_space(14.0);
+        self.lookup_status(ui);
+        changed |= self.plugin_list(ui, true);
+        if changed && let Some(plugins) = &self.rig {
+            self.rig_error = rig::save(plugins).err();
+        }
+        if let Some(e) = &self.rig_error {
+            ui.add_space(10.0);
+            ui.colored_label(error(), e);
+        }
+    }
 
+    /// Auto config or manual, for plugins that show up later.
+    fn new_plugins_choice(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("New plugins").size(13.0));
+            ui.add_space(6.0);
+            let options = [
+                (research::NewPlugins::Auto, "Auto config"),
+                (research::NewPlugins::Manual, "Manual"),
+            ];
+            if segmented(ui, "new-plugins", &mut self.new_plugins, &options) {
+                let mut settings = research::load_settings();
+                settings.new_plugins = self.new_plugins;
+                self.rig_error = research::save_settings(&settings).err();
+            }
+        });
+        let how = match self.new_plugins {
+            research::NewPlugins::Auto => {
+                "When GigEyes finds a new plugin, it asks whether you use it. Yes ticks both columns and looks it up."
+            }
+            research::NewPlugins::Manual => {
+                "New plugins appear unticked; you tick both columns yourself."
+            }
+        };
+        ui.label(RichText::new(how).size(13.0).weak());
+    }
+
+    /// The plugins in two tick columns: "Use" and "Look up". With `details`, what each looked-up
+    /// plugin models, with the sentences it came from. Returns whether a tick changed.
+    fn plugin_list(&mut self, ui: &mut egui::Ui, details: bool) -> bool {
+        let mut changed = false;
+        let (mut remove, mut again) = (None, None);
+        let auto = self.new_plugins == research::NewPlugins::Auto;
+        let (knowledge, failed, now) = (&self.knowledge, &self.lookup_failed, &self.looking_up);
         match &mut self.rig {
             None => {
                 let folders: Vec<String> = rig::default_folders()
@@ -645,6 +754,17 @@ impl App {
                 ui.add_space(10.0);
                 let filter = self.rig_filter.to_lowercase();
                 card(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 0.0;
+                        for heading in ["Use", "Look up"] {
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(CHECK_COLUMN, 16.0),
+                                Layout::top_down(Align::Center),
+                                |ui| ui.label(RichText::new(heading).size(12.0).weak()),
+                            );
+                        }
+                    });
+                    ui.add_space(4.0);
                     let mut shown = 0;
                     for plugin in plugins.iter_mut().filter(|p| {
                         filter.is_empty()
@@ -655,32 +775,148 @@ impl App {
                             ui.add_space(10.0);
                         }
                         shown += 1;
-                        let about: Vec<&str> = [plugin.vendor.as_str(), plugin.kind.as_str()]
-                            .into_iter()
-                            .filter(|s| !s.is_empty())
-                            .collect();
-                        let known = knowledge::about(&plugin.name);
-                        let models = models_line(&known);
-                        let detail = [about.join(" · "), models]
-                            .into_iter()
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        let detail =
-                            (!detail.is_empty()).then(|| RichText::new(detail).size(13.0).weak());
-                        changed |=
-                            tick(ui, &mut plugin.owned, semibold(&plugin.name, 15.0), detail);
-                        for entry in known {
-                            ui.horizontal(|ui| {
-                                ui.add_space(34.0); // under the name, past the tick box
-                                ui.hyperlink_to(
-                                    RichText::new(format!("Source: {}", entry.maker))
-                                        .size(12.0)
-                                        .color(ui.visuals().hyperlink_color),
-                                    &entry.source,
-                                );
+                        ui.horizontal_top(|ui| {
+                            let gap = ui.spacing().item_spacing.x;
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            let was = plugin.owned;
+                            changed |=
+                                check(ui, &mut plugin.owned, &format!("Use {}", plugin.name));
+                            if auto && plugin.owned && !was {
+                                plugin.lookup = true; // auto config: using it means looking it up
+                            }
+                            changed |=
+                                check(ui, &mut plugin.lookup, &format!("Look up {}", plugin.name));
+                            ui.add_space(12.0);
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.x = gap;
+                                ui.label(semibold(&plugin.name, 15.0));
+                                let about: Vec<&str> =
+                                    [plugin.vendor.as_str(), plugin.kind.as_str()]
+                                        .into_iter()
+                                        .filter(|s| !s.is_empty())
+                                        .collect();
+                                if !about.is_empty() {
+                                    ui.label(RichText::new(about.join(" · ")).size(13.0).weak());
+                                }
+                                if !(details && plugin.lookup) {
+                                    return;
+                                }
+                                match knowledge.about(&plugin.name) {
+                                    Some(known) if !known.models.is_empty() => {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{}  ·  found on the web",
+                                                models_line(known)
+                                            ))
+                                            .size(13.0),
+                                        );
+                                        egui::CollapsingHeader::new(
+                                            RichText::new(format!(
+                                                "What it models ({})",
+                                                known.models.len()
+                                            ))
+                                            .size(13.0),
+                                        )
+                                        .id_salt(("models", &plugin.name))
+                                        .show(ui, |ui| {
+                                            for (i, m) in known.models.iter().enumerate() {
+                                                if i > 0 {
+                                                    ui.add_space(8.0);
+                                                }
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.label(semibold(&m.gear, 14.0));
+                                                    if !m.model.is_empty() {
+                                                        ui.label(
+                                                            RichText::new(format!(
+                                                                "as {}",
+                                                                m.model
+                                                            ))
+                                                            .size(13.0),
+                                                        );
+                                                    }
+                                                    ui.label(
+                                                        RichText::new(&m.kind).size(12.0).weak(),
+                                                    );
+                                                });
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "\u{201C}{}\u{201D}",
+                                                        m.quote
+                                                    ))
+                                                    .size(13.0)
+                                                    .italics()
+                                                    .weak(),
+                                                );
+                                                ui.horizontal(|ui| {
+                                                    let domain = m
+                                                        .url
+                                                        .split('/')
+                                                        .nth(2)
+                                                        .unwrap_or_default()
+                                                        .trim_start_matches("www.");
+                                                    ui.hyperlink_to(
+                                                        RichText::new(domain)
+                                                            .size(12.0)
+                                                            .color(ui.visuals().hyperlink_color),
+                                                        &m.url,
+                                                    );
+                                                    if ui.small_button("Remove").clicked() {
+                                                        remove = Some((plugin.name.clone(), i));
+                                                    }
+                                                });
+                                            }
+                                            ui.add_space(6.0);
+                                            if ui.small_button("Look it up again").clicked() {
+                                                again = Some(plugin.name.clone());
+                                            }
+                                        });
+                                    }
+                                    Some(_) => {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.label(
+                                                RichText::new(
+                                                    "Nothing on the web says what it models.",
+                                                )
+                                                .size(13.0)
+                                                .weak(),
+                                            );
+                                            if ui.small_button("Look it up again").clicked() {
+                                                again = Some(plugin.name.clone());
+                                            }
+                                        });
+                                    }
+                                    None if now
+                                        .as_ref()
+                                        .is_some_and(|(n, ..)| n == &plugin.name) =>
+                                    {
+                                        ui.horizontal(|ui| {
+                                            listening(ui);
+                                            ui.label(RichText::new("Looking it up…").size(13.0));
+                                        });
+                                    }
+                                    None => match failed.get(&plugin.name) {
+                                        Some(e) => {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.colored_label(
+                                                    error(),
+                                                    RichText::new(e).size(13.0),
+                                                );
+                                                if ui.small_button("Try again").clicked() {
+                                                    again = Some(plugin.name.clone());
+                                                }
+                                            });
+                                        }
+                                        None => {
+                                            ui.label(
+                                                RichText::new("Not looked up yet.")
+                                                    .size(13.0)
+                                                    .weak(),
+                                            );
+                                        }
+                                    },
+                                }
                             });
-                        }
+                        });
                     }
                     if shown == 0 {
                         ui.label(RichText::new("No plugin or maker matches that.").weak());
@@ -688,12 +924,452 @@ impl App {
                 });
             }
         }
-        if changed && let Some(plugins) = &self.rig {
-            self.rig_error = rig::save(plugins).err();
+        if let Some((plugin, i)) = remove {
+            self.knowledge.remove_model(&plugin, i);
+            self.rig_error = self.knowledge.save().err();
         }
-        if let Some(e) = &self.rig_error {
+        if let Some(plugin) = again {
+            self.knowledge.plugins.retain(|k| k.plugin != plugin);
+            self.lookup_failed.remove(&plugin);
+            self.lookup_paused = false;
+            self.rig_error = self.knowledge.save().err();
+        }
+        changed
+    }
+
+    /// Ticked to be looked up, and not looked up yet (nor failed this session).
+    fn pending_lookups(&self) -> Vec<(String, String)> {
+        self.rig
+            .iter()
+            .flatten()
+            .filter(|p| {
+                p.lookup
+                    && self.knowledge.about(&p.name).is_none()
+                    && !self.lookup_failed.contains_key(&p.name)
+            })
+            .map(|p| (p.name.clone(), p.vendor.clone()))
+            .collect()
+    }
+
+    /// Take in what the lookup job found, and start one when plugins are waiting and the search key
+    /// and the local AI are there. Never while the AI reads a song's pages: one AI at a time.
+    fn run_lookups(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.lookup_job {
+            let mut finished = false;
+            while let Ok(message) = rx.try_recv() {
+                match message {
+                    Lookup::Now(name, i, n) => self.looking_up = Some((name, i, n)),
+                    Lookup::Done(name, Ok(models)) => {
+                        self.knowledge.set(&name, models);
+                        self.rig_error = self.knowledge.save().err();
+                    }
+                    Lookup::Done(_, Err(e)) if e == ai::STOPPED => {}
+                    Lookup::Done(name, Err(e)) => {
+                        self.lookup_failed.insert(name, e);
+                    }
+                    Lookup::Finished => finished = true,
+                }
+            }
+            if finished {
+                self.lookup_job = None;
+                self.looking_up = None;
+            }
+            return;
+        }
+        if self.lookup_paused
+            || self.ai_job.is_some()
+            || self.onboarding.is_some()
+            || self.tavily_key.trim().is_empty()
+        {
+            return;
+        }
+        let todo = self.pending_lookups();
+        if todo.is_empty() {
+            return;
+        }
+        let choice = self.choice();
+        let Some(model) = choice.model.filter(model::is_downloaded) else {
+            return;
+        };
+        let gpu = choice.backend != hardware::Backend::Cpu;
+        let (tx, rx) = mpsc::channel();
+        self.lookup_cancel = Arc::new(AtomicBool::new(false));
+        let (cancel, key, ctx) = (
+            self.lookup_cancel.clone(),
+            self.tavily_key.clone(),
+            ctx.clone(),
+        );
+        thread::spawn(move || {
+            let n = todo.len();
+            for (i, (name, vendor)) in todo.into_iter().enumerate() {
+                if cancel.load(Ordering::Relaxed) {
+                    break;
+                }
+                let _ = tx.send(Lookup::Now(name.clone(), i + 1, n));
+                ctx.request_repaint();
+                let page = AtomicUsize::new(0);
+                // shortcut: the AI starts and quits for each plugin; keep it running across them if
+                // looking up many plugins at once gets slow.
+                let found = research::search_plugin(&key, &name, &vendor).and_then(|pages| {
+                    if pages.sources.iter().all(|s| s.text.trim().is_empty()) {
+                        Ok(vec![])
+                    } else {
+                        ai::read(&model, gpu, &pages, ai::Task::Plugin, &page, &cancel)
+                    }
+                });
+                let _ = tx.send(Lookup::Done(name, found));
+                ctx.request_repaint();
+            }
+            let _ = tx.send(Lookup::Finished);
+            ctx.request_repaint();
+        });
+        self.lookup_job = Some(rx);
+    }
+
+    /// Above the plugin list: what the lookups are doing, or what they wait for.
+    fn lookup_status(&mut self, ui: &mut egui::Ui) {
+        let waiting = match self.pending_lookups().len() {
+            1 => "1 plugin waits".to_string(),
+            n => format!("{n} plugins wait"),
+        };
+        let line = if let Some((name, i, n)) = self.looking_up.clone() {
+            card(ui, |ui| {
+                ui.horizontal(|ui| {
+                    listening(ui);
+                    ui.label(format!("Looking up what {name} models ({i} of {n})…"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Stop").clicked() {
+                            self.lookup_cancel.store(true, Ordering::Relaxed);
+                            self.lookup_paused = true;
+                        }
+                    });
+                });
+            });
+            ui.add_space(12.0);
+            return;
+        } else if self.pending_lookups().is_empty() {
+            return;
+        } else if self.tavily_key.trim().is_empty() {
+            format!("{waiting} to be looked up. Add a search key in Settings to start.")
+        } else if !self
+            .choice()
+            .model
+            .is_some_and(|m| model::is_downloaded(&m))
+        {
+            format!("{waiting} to be looked up. Download the local AI in Settings to start.")
+        } else if self.lookup_paused {
+            format!("{waiting} to be looked up.")
+        } else if self.ai_job.is_some() {
+            format!("{waiting} to be looked up once the AI has read the song's pages.")
+        } else {
+            return;
+        };
+        card(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(line).size(13.0));
+                if self.lookup_paused && ui.button("Look up now").clicked() {
+                    self.lookup_paused = false;
+                }
+            });
+        });
+        ui.add_space(12.0);
+    }
+
+    /// Auto config: "New plugin: X. Do you play through it?" for each plugin found since last time.
+    fn new_plugin_banner(&mut self, ui: &mut egui::Ui) {
+        let Some(path) = self.asking.first().cloned() else {
+            return;
+        };
+        let Some(plugin) = self.rig.iter().flatten().find(|p| p.path == path).cloned() else {
+            self.asking.remove(0);
+            return;
+        };
+        let mut answer = None;
+        card(ui, |ui| {
+            ui.label(semibold(format!("New plugin: {}", plugin.name), 16.0));
+            if !plugin.vendor.is_empty() {
+                ui.label(RichText::new(&plugin.vendor).size(13.0).weak());
+            }
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(
+                    "Do you play through it? Yes ticks it in Your rig and looks up what it models.",
+                )
+                .size(13.0),
+            );
             ui.add_space(10.0);
-            ui.colored_label(error(), e);
+            ui.horizontal(|ui| {
+                let yes = egui::Button::new(semibold("Yes", 15.0).color(ON_ACCENT)).fill(accent());
+                if ui.add(yes).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("No").clicked() {
+                    answer = Some(false);
+                }
+                let more = self.asking.len() - 1;
+                if more > 0 {
+                    ui.label(
+                        RichText::new(format!("{more} more after this"))
+                            .size(13.0)
+                            .weak(),
+                    );
+                }
+            });
+        });
+        ui.add_space(14.0);
+        if let Some(yes) = answer {
+            self.asking.remove(0);
+            if let Some(p) = self.rig.iter_mut().flatten().find(|p| p.path == path) {
+                (p.owned, p.lookup) = (yes, yes);
+            }
+            if let Some(plugins) = &self.rig {
+                self.rig_error = rig::save(plugins).err();
+            }
+        }
+    }
+
+    /// The first-start setup, one step at a time; every step can be left as it is.
+    fn onboarding_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, step: usize) {
+        ui.label(
+            RichText::new(format!("Step {} of {STEPS}", step + 1))
+                .size(13.0)
+                .weak(),
+        );
+        ui.add_space(6.0);
+        let since = self.onboarding_at;
+        enter(ui, since, |ui| match step {
+            0 => {
+                ui.label(semibold("Welcome to GigEyes", 26.0));
+                ui.label(
+                    RichText::new("A few quick choices so GigEyes fits how you play. You can change all of them later in Settings.")
+                        .weak(),
+                );
+                ui.add_space(16.0);
+                card(ui, |ui| {
+                    ui.label(semibold("Appearance", 17.0));
+                    ui.add_space(8.0);
+                    self.appearance(ui, ctx);
+                });
+            }
+            1 => {
+                ui.label(semibold("Your guitar", 22.0));
+                ui.label(
+                    RichText::new(
+                        "What do you play? GigEyes keeps it in mind for its suggestions.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(16.0);
+                card(ui, |ui| self.guitar_field(ui));
+            }
+            2 => {
+                ui.label(semibold("Your plugins", 22.0));
+                ui.label(
+                    RichText::new("Tick the plugins you play through, and the ones GigEyes should look up. Looking up searches the web for the real gear each plugin models and lets the local AI read the pages; it starts once the next two steps are done, and what it finds stays on this PC.")
+                        .weak(),
+                );
+                ui.add_space(12.0);
+                self.new_plugins_choice(ui);
+                ui.add_space(12.0);
+                if self.rig.is_none() {
+                    self.rig = Some(rig::scan(&rig::default_folders()));
+                    if let Some(plugins) = &self.rig {
+                        self.rig_error = rig::save(plugins).err();
+                    }
+                }
+                if self.plugin_list(ui, false)
+                    && let Some(plugins) = &self.rig
+                {
+                    self.rig_error = rig::save(plugins).err();
+                }
+            }
+            3 => {
+                ui.label(semibold("Search key", 22.0));
+                ui.label(
+                    RichText::new("Song research and plugin lookups search the web with your own Tavily key. The free plan has 1,000 searches a month and needs no card.")
+                        .weak(),
+                );
+                ui.add_space(16.0);
+                card(ui, |ui| self.key_field(ui));
+            }
+            _ => {
+                ui.label(semibold("Local AI", 22.0));
+                ui.label(
+                    RichText::new("The local AI reads the pages GigEyes finds, here on this PC, and quits when it's done.")
+                        .weak(),
+                );
+                ui.add_space(16.0);
+                card(ui, |ui| self.local_ai(ui, ctx));
+            }
+        });
+        ui.add_space(20.0);
+        let now = ctx.input(|i| i.time);
+        ui.horizontal(|ui| {
+            if step > 0 && ui.button("Back").clicked() {
+                self.onboarding = Some(step - 1);
+                self.onboarding_at = now;
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let last = step + 1 == STEPS;
+                let label = if last { "Finish" } else { "Next" };
+                let next = egui::Button::new(semibold(label, 15.0).color(ON_ACCENT))
+                    .fill(accent())
+                    .min_size(Vec2::new(110.0, 0.0));
+                if ui.add(next).clicked() {
+                    if last {
+                        let mut settings = research::load_settings();
+                        settings.onboarded = true;
+                        self.rig_error = research::save_settings(&settings).err();
+                        self.onboarding = None;
+                        self.screen = Screen::Tone;
+                        self.shown_at = now;
+                    } else {
+                        self.onboarding = Some(step + 1);
+                        self.onboarding_at = now;
+                    }
+                }
+            });
+        });
+    }
+
+    /// The guitar's name, saved as it's typed.
+    fn guitar_field(&mut self, ui: &mut egui::Ui) {
+        let field = egui::TextEdit::singleline(&mut self.guitar)
+            .hint_text("e.g. Ibanez RG550")
+            .margin(Vec2::new(10.0, 7.0))
+            .desired_width(320.0);
+        if ui.add(field).changed() {
+            let mut settings = research::load_settings();
+            settings.guitar = self.guitar.trim().to_string();
+            self.rig_error = research::save_settings(&settings).err();
+        }
+    }
+
+    /// Dark or light, saved, with the crossfade.
+    fn appearance(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut light = ctx.theme() == egui::Theme::Light;
+        if segmented(
+            ui,
+            "appearance",
+            &mut light,
+            &[(false, "Dark"), (true, "Light")],
+        ) {
+            self.theme_fade = Some((ground(), ctx.input(|i| i.time)));
+            apply_theme(ctx, light);
+            let mut settings = research::load_settings();
+            settings.light = light;
+            self.key_note = research::save_settings(&settings).err();
+        }
+    }
+
+    /// The Tavily key, saved as it's typed or pasted.
+    fn key_field(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            let field = egui::TextEdit::singleline(&mut self.tavily_key)
+                .hint_text("tvly-…")
+                .password(true)
+                .margin(Vec2::new(10.0, 7.0))
+                .desired_width(320.0);
+            // Saved as soon as it's typed or pasted: research uses the key at once, so it has
+            // to outlast a restart or an update too, with no button to forget.
+            if ui.add(field).changed() {
+                let mut settings = research::load_settings();
+                settings.tavily_key = self.tavily_key.trim().to_string();
+                self.key_note = Some(match research::save_settings(&settings) {
+                    Ok(()) if self.tavily_key.trim().is_empty() => "Key removed.".into(),
+                    Ok(()) => "Saved.".into(),
+                    Err(e) => e,
+                });
+            }
+            ui.hyperlink_to("Get a free key", research::KEY_PAGE);
+        });
+        if let Some(note) = &self.key_note {
+            ui.label(RichText::new(note).size(13.0).weak());
+        }
+    }
+
+    /// What this PC can run, and the download.
+    fn local_ai(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let choice = self.choice();
+        let hw = self.hardware.as_ref().expect("read by choice()").0.clone();
+        let gpu = match &hw.gpu {
+            Some(g) => format!("{} with {:.0} GB of video memory", g.name, g.vram_gb),
+            None => "no separate graphics card".into(),
+        };
+        ui.label(
+            RichText::new(format!(
+                "This PC: {gpu}, and {:.0} GB of memory.",
+                hw.ram_gb
+            ))
+            .size(13.0)
+            .weak(),
+        );
+        ui.add_space(10.0);
+        match &choice.model {
+            Some(model) => {
+                ui.label(semibold(
+                    format!("{}  ·  {:.1} GB download", model.name, model.size_gb),
+                    15.0,
+                ));
+            }
+            None => {
+                ui.label(semibold("No local AI on this PC", 15.0));
+            }
+        }
+        ui.label(RichText::new(&choice.reason).size(13.0));
+        if let Some(model) = &choice.model {
+            ui.add_space(8.0);
+            if self.get_ai.is_some() {
+                let done = self.get_ai_done.load(Ordering::Relaxed);
+                let shown = ctx.animate_value_with_time(
+                    egui::Id::NULL.with("get-ai-bar"),
+                    done as f32 / self.get_ai_total.max(1) as f32,
+                    secs(0.3),
+                );
+                ui.add(
+                    egui::ProgressBar::new(shown)
+                        .fill(accent())
+                        .desired_height(6.0)
+                        .corner_radius(3),
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.1} of {:.1} GB",
+                            done as f32 / 1e9,
+                            self.get_ai_total as f32 / 1e9
+                        ))
+                        .size(13.0)
+                        .weak(),
+                    );
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Stop").clicked() {
+                            self.get_ai_cancel.store(true, Ordering::Relaxed);
+                        }
+                    });
+                });
+            } else if model::is_downloaded(model) {
+                ui.label(
+                    RichText::new("Downloaded. It reads your research pages when you ask, then quits to free the memory.")
+                        .size(13.0)
+                        .weak(),
+                );
+            } else {
+                let missing = model::missing_bytes(model) as f32 / 1e9;
+                let go = egui::Button::new(
+                    semibold(format!("Download, {missing:.1} GB"), 15.0).color(ON_ACCENT),
+                )
+                .fill(accent());
+                if ui.add(go).clicked() {
+                    self.start_ai_download(ctx);
+                }
+            }
+            if let Some(note) = &self.get_ai_note {
+                ui.add_space(6.0);
+                ui.colored_label(error(), note);
+            }
         }
     }
 
@@ -703,19 +1379,7 @@ impl App {
         card(ui, |ui| {
             ui.label(semibold("Appearance", 17.0));
             ui.add_space(8.0);
-            let mut light = ctx.theme() == egui::Theme::Light;
-            if segmented(
-                ui,
-                "appearance",
-                &mut light,
-                &[(false, "Dark"), (true, "Light")],
-            ) {
-                self.theme_fade = Some((ground(), ctx.input(|i| i.time)));
-                apply_theme(ctx, light);
-                let mut settings = research::load_settings();
-                settings.light = light;
-                self.key_note = research::save_settings(&settings).err();
-            }
+            self.appearance(ui, ctx);
         });
 
         ui.add_space(14.0);
@@ -765,120 +1429,40 @@ impl App {
 
         ui.add_space(14.0);
         card(ui, |ui| {
+            ui.label(semibold("Your guitar", 17.0));
+            ui.add_space(8.0);
+            self.guitar_field(ui);
+        });
+
+        ui.add_space(14.0);
+        card(ui, |ui| {
+            ui.label(semibold("First-start setup", 17.0));
+            ui.label(
+                RichText::new("Go through appearance, your guitar, your plugins, the search key and the local AI again.")
+                    .size(13.0)
+                    .weak(),
+            );
+            ui.add_space(10.0);
+            if ui.button("Run it again").clicked() {
+                self.onboarding = Some(0);
+                self.onboarding_at = ctx.input(|i| i.time);
+            }
+        });
+        ui.add_space(14.0);
+        card(ui, |ui| {
             ui.label(semibold("Song research", 17.0));
             ui.label(
                 RichText::new("GigEyes searches the web with your own Tavily key. The free plan has 1,000 searches a month and needs no card.")
                     .size(13.0)
                     .weak(),
             );
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                let field = egui::TextEdit::singleline(&mut self.tavily_key)
-                    .hint_text("tvly-…")
-                    .password(true)
-                    .margin(Vec2::new(10.0, 7.0))
-                    .desired_width(320.0);
-                // Saved as soon as it's typed or pasted: research uses the key at once, so it has
-                // to outlast a restart or an update too, with no button to forget.
-                if ui.add(field).changed() {
-                    let mut settings = research::load_settings();
-                    settings.tavily_key = self.tavily_key.trim().to_string();
-                    self.key_note = Some(match research::save_settings(&settings) {
-                        Ok(()) if self.tavily_key.trim().is_empty() => "Key removed.".into(),
-                        Ok(()) => "Saved.".into(),
-                        Err(e) => e,
-                    });
-                }
-                ui.hyperlink_to("Get a free key", research::KEY_PAGE);
-            });
-            if let Some(note) = &self.key_note {
-                ui.label(RichText::new(note).size(13.0).weak());
-            }
+            self.key_field(ui);
         });
 
         ui.add_space(14.0);
-        let choice = self.choice();
-        let hw = self.hardware.as_ref().expect("read by choice()").0.clone();
         card(ui, |ui| {
             ui.label(semibold("Local AI", 17.0));
-            let gpu = match &hw.gpu {
-                Some(g) => format!("{} with {:.0} GB of video memory", g.name, g.vram_gb),
-                None => "no separate graphics card".into(),
-            };
-            ui.label(
-                RichText::new(format!(
-                    "This PC: {gpu}, and {:.0} GB of memory.",
-                    hw.ram_gb
-                ))
-                .size(13.0)
-                .weak(),
-            );
-            ui.add_space(10.0);
-            match &choice.model {
-                Some(model) => {
-                    ui.label(semibold(
-                        format!("{}  ·  {:.1} GB download", model.name, model.size_gb),
-                        15.0,
-                    ));
-                }
-                None => {
-                    ui.label(semibold("No local AI on this PC", 15.0));
-                }
-            }
-            ui.label(RichText::new(&choice.reason).size(13.0));
-            if let Some(model) = &choice.model {
-                ui.add_space(8.0);
-                if self.get_ai.is_some() {
-                    let done = self.get_ai_done.load(Ordering::Relaxed);
-                    let shown = ctx.animate_value_with_time(
-                        egui::Id::NULL.with("get-ai-bar"),
-                        done as f32 / self.get_ai_total.max(1) as f32,
-                        secs(0.3),
-                    );
-                    ui.add(
-                        egui::ProgressBar::new(shown)
-                            .fill(accent())
-                            .desired_height(6.0)
-                            .corner_radius(3),
-                    );
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            RichText::new(format!(
-                                "{:.1} of {:.1} GB",
-                                done as f32 / 1e9,
-                                self.get_ai_total as f32 / 1e9
-                            ))
-                            .size(13.0)
-                            .weak(),
-                        );
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.button("Stop").clicked() {
-                                self.get_ai_cancel.store(true, Ordering::Relaxed);
-                            }
-                        });
-                    });
-                } else if model::is_downloaded(model) {
-                    ui.label(
-                        RichText::new("Downloaded. It reads your research pages when you ask, then quits to free the memory.")
-                            .size(13.0)
-                            .weak(),
-                    );
-                } else {
-                    let missing = model::missing_bytes(model) as f32 / 1e9;
-                    let go = egui::Button::new(
-                        semibold(format!("Download, {missing:.1} GB"), 15.0).color(ON_ACCENT),
-                    )
-                    .fill(accent());
-                    if ui.add(go).clicked() {
-                        self.start_ai_download(ctx);
-                    }
-                }
-                if let Some(note) = &self.get_ai_note {
-                    ui.add_space(6.0);
-                    ui.colored_label(error(), note);
-                }
-            }
+            self.local_ai(ui, ctx);
         });
 
         ui.add_space(14.0);
@@ -1061,7 +1645,10 @@ impl App {
             return;
         }
         // Forget what was read from those files.
+        self.lookup_cancel.store(true, Ordering::Relaxed);
         (self.rig, self.research, self.key_note) = (None, None, None);
+        self.knowledge = knowledge::Knowledge::default();
+        self.asking.clear();
         self.tavily_key.clear();
         self.remove_note = Some(match uninstaller {
             Some(path) => match update::run_as_admin(path, "--uninstall") {
@@ -1098,11 +1685,11 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
 }
 
 /// Search excerpts can run long; keep a readable two or three lines.
-/// "Models the Mesa/Boogie Mark IIC+", or how many models and a few of them, for a plugin GigEyes knows.
-fn models_line(known: &[&knowledge::Entry]) -> String {
+/// "Models the Mesa/Boogie Mark IIC+", or how many and a few of them, for a looked-up plugin.
+fn models_line(known: &knowledge::Known) -> String {
     let mut real: Vec<&str> = vec![];
-    for model in known.iter().flat_map(|e| &e.models) {
-        let name = model.real.split('(').next().unwrap_or_default().trim();
+    for model in &known.models {
+        let name = model.gear.split('(').next().unwrap_or_default().trim();
         if !real.contains(&name) {
             real.push(name);
         }
@@ -1125,21 +1712,25 @@ fn models_line(known: &[&knowledge::Entry]) -> String {
     }
 }
 
-/// "In your rig: Helix Native (Brit 2203), Amp Room (Marshall JCM800) and 1 more" when ticked
-/// plugins model this gear.
-fn in_your_rig(gear: &str, kind: &str, rig: Option<&[rig::Plugin]>) -> Option<String> {
-    let matches = knowledge::who_models(gear, kind, rig?);
+/// "In your rig: Helix Native (Cali Rectifire), TSE808 and 1 more" when ticked plugins model this gear.
+fn in_your_rig(
+    knowledge: &knowledge::Knowledge,
+    gear: &str,
+    kind: &str,
+    rig: Option<&[rig::Plugin]>,
+) -> Option<String> {
+    let matches = knowledge.who_models(gear, kind, rig?);
     let named: Vec<String> = matches
         .iter()
         .take(3)
         .map(|m| {
-            if knowledge::about(m.plugin)
-                .iter()
-                .all(|e| e.models.len() == 1)
-            {
-                m.plugin.to_string() // a plugin that is that one amp
-            } else {
-                format!("{} ({})", m.plugin, m.model.model)
+            let single = knowledge
+                .about(m.plugin)
+                .is_some_and(|k| k.models.len() == 1);
+            match (single, m.model.model.is_empty()) {
+                (true, _) => m.plugin.to_string(), // a plugin that is that one amp
+                (false, false) => format!("{} ({})", m.plugin, m.model.model),
+                (false, true) => format!("{} ({})", m.plugin, m.model.gear),
             }
         })
         .collect();
@@ -1272,6 +1863,7 @@ impl eframe::App for App {
         let (head_in, body_in) = intro.map_or((1.0, 1.0), intro::content);
         let mut home = egui::Rect::NOTHING;
 
+        self.run_lookups(&ctx);
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let has_result = matches!(self.state, State::Done(..));
         if (self.screen, has_result) != self.shown {
@@ -1295,7 +1887,12 @@ impl eframe::App for App {
                 let width = ui.available_width() - 2.0 * side;
                 column(ui, side, width, |ui| {
                     home = settle(ui, head_in, |ui| {
-                        header(ui, &mut self.screen, intro.is_none())
+                        header(
+                            ui,
+                            &mut self.screen,
+                            intro.is_none(),
+                            self.onboarding.is_none(),
+                        )
                     });
                 });
                 ui.add_space(20.0);
@@ -1306,12 +1903,17 @@ impl eframe::App for App {
                             settle(ui, body_in, |ui| {
                                 ui.add_space(4.0);
                                 self.update_banner(ui, &ctx);
-                                let since = self.shown_at;
-                                enter(ui, since, |ui| match self.screen {
-                                    Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
-                                    Screen::Rig => self.rig_view(ui),
-                                    Screen::Settings => self.settings_view(ui, &ctx),
-                                });
+                                if let Some(step) = self.onboarding {
+                                    self.onboarding_view(ui, &ctx, step);
+                                } else {
+                                    self.new_plugin_banner(ui);
+                                    let since = self.shown_at;
+                                    enter(ui, since, |ui| match self.screen {
+                                        Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
+                                        Screen::Rig => self.rig_view(ui),
+                                        Screen::Settings => self.settings_view(ui, &ctx),
+                                    });
+                                }
                                 ui.add_space(32.0);
                             });
                         });
@@ -1385,7 +1987,7 @@ fn icon(source: ImageSource<'static>, size: f32, tint: Color32) -> egui::Image<'
 
 /// Returns where the mark sits, for the intro to land on. `show_mark` is false while the intro's own
 /// pick is still on its way there.
-fn header(ui: &mut egui::Ui, screen: &mut Screen, show_mark: bool) -> egui::Rect {
+fn header(ui: &mut egui::Ui, screen: &mut Screen, show_mark: bool, tabs: bool) -> egui::Rect {
     ui.horizontal(|ui| {
         let (home, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
         if show_mark {
@@ -1397,6 +1999,9 @@ fn header(ui: &mut egui::Ui, screen: &mut Screen, show_mark: bool) -> egui::Rect
             ui.label(RichText::new("Hear a tone. See where the knobs sit.").weak());
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if !tabs {
+                return; // the first-start setup leads through its own steps
+            }
             segmented(
                 ui,
                 "screens",

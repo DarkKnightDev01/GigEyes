@@ -59,7 +59,7 @@ pub fn error() -> Color32 {
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x14, 0x13, 0x11);
 pub const RADIUS: u8 = 8;
 /// The version people see. Four parts, Windows style; Cargo's own version only allows three.
-pub const VERSION: &str = "0.6";
+pub const VERSION: &str = "0.7";
 /// Barlow (SIL Open Font License, see fonts/OFL.txt), with egui's own fonts behind it for missing glyphs.
 pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
@@ -181,6 +181,7 @@ pub fn paint_mark(painter: &egui::Painter, rect: egui::Rect, bars: [f32; 5], opa
 
 /// A checkbox row that reads at a glance: amber when ticked, outlined when not. The whole row toggles it,
 /// by mouse or by Space on keyboard focus. Returns true when it was toggled.
+#[allow(dead_code)] // the setup uses it; the app ticks plugins in two columns with its own boxes
 pub fn tick(ui: &mut egui::Ui, on: &mut bool, title: RichText, detail: Option<RichText>) -> bool {
     let name = title.text().to_string();
     let backdrop = ui.painter().add(Shape::Noop);
@@ -228,19 +229,60 @@ pub fn tick(ui: &mut egui::Ui, on: &mut bool, title: RichText, detail: Option<Ri
             egui::StrokeKind::Inside,
         );
     }
-    let b = egui::Rect::from_center_size(row.inner.center(), Vec2::splat(16.0));
-    if *on {
-        ui.painter().rect_filled(b, CornerRadius::same(4), accent());
+    paint_box(ui.painter(), row.inner.center(), *on, response.hovered());
+    response.changed()
+}
+
+/// Width of a column of tick boxes (see `check`), for headers to line up with it.
+pub const CHECK_COLUMN: f32 = 52.0;
+
+/// A tick box in a column of its own, CHECK_COLUMN wide, with no text beside it: `name` is what
+/// screen readers say and what shows on hover. Space toggles it when focused. Returns whether it changed.
+pub fn check(ui: &mut egui::Ui, on: &mut bool, name: &str) -> bool {
+    let (cell, mut response) =
+        ui.allocate_exact_size(Vec2::new(CHECK_COLUMN, 22.0), Sense::click());
+    if response.clicked() {
+        *on = !*on;
+        response.mark_changed();
+    }
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, *on, name));
+    let b = egui::Rect::from_center_size(cell.center(), Vec2::splat(22.0));
+    let lit = ui
+        .ctx()
+        .animate_bool_with_time(response.id, response.hovered(), secs(0.12));
+    if lit > 0.0 {
+        ui.painter().rect_filled(
+            b.expand(3.0),
+            CornerRadius::same(6),
+            raised().gamma_multiply(0.7 * lit),
+        );
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            b.expand(3.0),
+            CornerRadius::same(6),
+            Stroke::new(1.0, muted()),
+            egui::StrokeKind::Inside,
+        );
+    }
+    paint_box(ui.painter(), cell.center(), *on, response.hovered());
+    response.on_hover_text(name).changed()
+}
+
+/// The 16 px box: amber with a check when ticked, outlined when not.
+fn paint_box(painter: &egui::Painter, centre: Pos2, on: bool, hovered: bool) {
+    let b = egui::Rect::from_center_size(centre, Vec2::splat(16.0));
+    if on {
+        painter.rect_filled(b, CornerRadius::same(4), accent());
         let check = vec![
             Pos2::new(b.left() + 3.5, b.center().y),
             Pos2::new(b.left() + 6.5, b.bottom() - 4.0),
             Pos2::new(b.right() - 3.5, b.top() + 4.0),
         ];
-        ui.painter()
-            .add(Shape::line(check, Stroke::new(2.0, ON_ACCENT)));
+        painter.add(Shape::line(check, Stroke::new(2.0, ON_ACCENT)));
     } else {
-        let edge = if response.hovered() { ink() } else { muted() };
-        ui.painter().rect(
+        let edge = if hovered { ink() } else { muted() };
+        painter.rect(
             b,
             CornerRadius::same(4),
             well(),
@@ -248,7 +290,6 @@ pub fn tick(ui: &mut egui::Ui, on: &mut bool, title: RichText, detail: Option<Ri
             egui::StrokeKind::Inside,
         );
     }
-    response.changed()
 }
 
 /// A rounded panel one tone step above the ground, used for every block of content.

@@ -14,6 +14,9 @@ pub struct Plugin {
     pub kind: String,
     /// Ticked by the user: GigEyes only suggests plugins they own and use.
     pub owned: bool,
+    /// Ticked by the user: look up on the web what real gear this plugin models.
+    #[serde(default)]
+    pub lookup: bool,
 }
 
 /// Where Windows installs VST3 plugins: for all users, and for this user only.
@@ -67,7 +70,9 @@ fn describe(path: &Path) -> Option<Plugin> {
         name: fallback,
         vendor: String::new(),
         kind: String::new(),
-        owned: true,
+        // New plugins start unticked: the user says which they use (or is asked, in auto config).
+        owned: false,
+        lookup: false,
     };
     let info = std::fs::read_to_string(
         path.join("Contents")
@@ -133,6 +138,7 @@ pub fn merge(previous: &[Plugin], scanned: Vec<Plugin>) -> Vec<Plugin> {
         .map(|mut p| {
             if let Some(old) = previous.iter().find(|old| old.path == p.path) {
                 p.owned = old.owned;
+                p.lookup = old.lookup;
             }
             p
         })
@@ -236,13 +242,14 @@ mod tests {
         bundle(&main.0, "Amp.vst3", None);
         bundle(&other.0, "Pedal.vst3", None);
         let mut before = scan(&[main.0.clone(), other.0.clone()]);
-        before[0].owned = false; // the user unticked Amp
+        before[1].owned = true; // the user ticked Pedal; Amp stays unticked
         before.push(Plugin {
             path: main.0.join("Gone.vst3"),
             name: "Gone".into(),
             vendor: String::new(),
             kind: String::new(),
             owned: true,
+            lookup: false,
         });
 
         let after = rescan(&before, std::slice::from_ref(&main.0));
@@ -252,17 +259,22 @@ mod tests {
 
     #[test]
     fn rescan_keeps_the_users_ticks() {
-        let p = |name: &str, owned| Plugin {
+        let p = |name: &str, owned, lookup| Plugin {
             path: name.into(),
             name: name.into(),
             vendor: String::new(),
             kind: String::new(),
             owned,
+            lookup,
         };
         let merged = merge(
-            &[p("a.vst3", false)],
-            vec![p("a.vst3", true), p("b.vst3", true)],
+            &[p("a.vst3", true, true)],
+            vec![p("a.vst3", false, false), p("b.vst3", false, false)],
         );
-        assert_eq!(merged, [p("a.vst3", false), p("b.vst3", true)]);
+        assert_eq!(
+            merged,
+            [p("a.vst3", true, true), p("b.vst3", false, false)],
+            "both ticks kept; a new plugin starts unticked"
+        );
     }
 }
