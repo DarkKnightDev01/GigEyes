@@ -13,7 +13,7 @@ Pre-alpha. What works today:
 - **Song research:** with your own free search key, GigEyes finds interviews, rig rundowns and gear lists for the song, each linked so you can check it, and saves them so they open offline later.
 - **AI reading:** a local AI reads the pages research found and lists the gear and any published settings, each with the sentence it came from and a link to the page. It runs on your PC, nothing is sent anywhere, and anything it can't back with a sentence that's really on the page is dropped.
 - **Local AI choice:** GigEyes reads your graphics card and memory and picks the biggest local model that still leaves room for Gig Performer. The setup offers to download it (untick to skip), or get it later in **Settings → Local AI**.
-- **Settings:** light or dark mode, your search key, the local AI, and **Remove all GigEyes files**.
+- **Settings:** light or dark mode, the startup intro (every launch or only after updates), your search key, the local AI, and **Remove all GigEyes files**.
 
 Coming next, in order:
 

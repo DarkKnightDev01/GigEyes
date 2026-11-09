@@ -59,7 +59,7 @@ pub fn error() -> Color32 {
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x14, 0x13, 0x11);
 pub const RADIUS: u8 = 8;
 /// The version people see. Four parts, Windows style; Cargo's own version only allows three.
-pub const VERSION: &str = "0.5.0.4";
+pub const VERSION: &str = "0.5.1";
 /// Barlow (SIL Open Font License, see fonts/OFL.txt), with egui's own fonts behind it for missing glyphs.
 pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
@@ -142,9 +142,16 @@ pub fn semibold(text: impl Into<String>, size: f32) -> RichText {
 }
 
 /// The GigEyes mark: a guitar pick with a waveform cut into it.
+#[allow(dead_code)] // the setup draws it; the app draws it through paint_mark for its intro
 pub fn mark(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    let painter = ui.painter_at(rect);
+    paint_mark(&ui.painter_at(rect), rect, [1.0; 5], 1.0);
+}
+
+/// The mark drawn into `rect`, each of its five bars at `bars[i]` of its height (the startup intro
+/// raises them like a level meter), the whole mark at `opacity`.
+pub fn paint_mark(painter: &egui::Painter, rect: egui::Rect, bars: [f32; 5], opacity: f32) {
+    let size = rect.width();
     let (c, r) = (rect.center() - Vec2::new(0.0, size * 0.04), size * 0.42);
     // r(θ) = 1 + k·cos 3θ stays convex for k < 1/8; the point faces down like a pick.
     let outline = (0..60)
@@ -154,15 +161,21 @@ pub fn mark(ui: &mut egui::Ui, size: f32) {
             c + Vec2::new(rr * a.cos(), rr * a.sin())
         })
         .collect();
-    painter.add(Shape::convex_polygon(outline, accent(), Stroke::NONE));
+    painter.add(Shape::convex_polygon(
+        outline,
+        accent().gamma_multiply(opacity),
+        Stroke::NONE,
+    ));
     for (i, h) in [0.30f32, 0.62, 0.92, 0.55, 0.28].iter().enumerate() {
         let x = c.x + (i as f32 - 2.0) * r * 0.26;
-        let half = h * r * 0.42;
+        let half = h * r * 0.42 * bars[i];
         let y = c.y - r * 0.05;
-        painter.line_segment(
-            [Pos2::new(x, y - half), Pos2::new(x, y + half)],
-            Stroke::new(r * 0.13, ground()),
-        );
+        if half > 0.0 {
+            painter.line_segment(
+                [Pos2::new(x, y - half), Pos2::new(x, y + half)],
+                Stroke::new(r * 0.13, ground().gamma_multiply(opacity)),
+            );
+        }
     }
 }
 
@@ -348,10 +361,15 @@ pub fn enter<R>(ui: &mut egui::Ui, since: f64, add: impl FnOnce(&mut egui::Ui) -
     if t < 1.0 {
         ui.ctx().request_repaint();
     }
-    let eased = egui::emath::easing::cubic_out(t);
+    settle(ui, egui::emath::easing::cubic_out(t), add)
+}
+
+/// Draw `add` at `t` of the way through an entrance (0..1, already eased): faded to `t` and lifted the
+/// rest of the way from 8 px below. Only the drawing moves; clicks land where the content will be.
+pub fn settle<R>(ui: &mut egui::Ui, t: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
-        ui.multiply_opacity(eased);
-        let lift = egui::emath::TSTransform::from_translation(Vec2::new(0.0, 8.0 * (1.0 - eased)));
+        ui.multiply_opacity(t);
+        let lift = egui::emath::TSTransform::from_translation(Vec2::new(0.0, 8.0 * (1.0 - t)));
         ui.with_visual_transform(lift, add).inner
     })
     .inner

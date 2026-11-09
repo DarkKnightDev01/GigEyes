@@ -1,0 +1,117 @@
+//! The startup intro, so GigEyes doesn't just pop up. The amber pick fades and scales in, its five
+//! bars rise one after another like a level meter, then it glides into its place in the header while
+//! the header and the screen below settle in. About a second; a click, a key or a dropped file skips
+//! it. It plays even when Windows animations are off: that's how the user asked for it.
+
+use crate::look::paint_mark;
+use eframe::egui::{self, Rect, Vec2};
+
+/// Strong ease-out for things arriving, strong ease-in-out for moving across the screen
+/// (Emil Kowalski's UI curves), and easeOutBack (easings.net) for the meter's peak and settle.
+const EASE_OUT: [f32; 4] = [0.23, 1.0, 0.32, 1.0];
+const EASE_IN_OUT: [f32; 4] = [0.77, 0.0, 0.175, 1.0];
+const OVERSHOOT: [f32; 4] = [0.34, 1.56, 0.64, 1.0];
+
+/// (start, length) in seconds from the first frame.
+const PICK: (f64, f64) = (0.05, 0.40);
+const BARS_FROM: f64 = 0.22;
+const BAR_STAGGER: f64 = 0.045;
+const BAR_LENGTH: f64 = 0.26;
+const GLIDE: (f64, f64) = (0.62, 0.40);
+const HEADER: (f64, f64) = (0.74, 0.30);
+const BODY: (f64, f64) = (0.82, 0.30);
+pub const END: f64 = 1.12;
+/// The pick's size in the middle of the window, before it glides into its 40 px header slot.
+const BIG: f32 = 120.0;
+/// It starts a little small, never from nothing.
+const START_SCALE: f32 = 0.9;
+
+/// How far the header and the screen below are through settling in, eased, at `elapsed`.
+pub fn content(elapsed: f64) -> (f32, f32) {
+    (
+        step(HEADER, elapsed, EASE_OUT),
+        step(BODY, elapsed, EASE_OUT),
+    )
+}
+
+/// Draw the pick for `elapsed` seconds into the intro, above everything. `home` is the header slot
+/// it lands in; at the end it sits exactly there, so the header's own mark takes over unseen.
+pub fn logo(ctx: &egui::Context, elapsed: f64, home: Rect) {
+    let appear = step(PICK, elapsed, EASE_OUT);
+    let glide = step(GLIDE, elapsed, EASE_IN_OUT);
+    let window = ctx.content_rect();
+    let centre = window.center() - Vec2::new(0.0, window.height() * 0.04);
+    let size = egui::lerp(BIG..=home.width(), glide) * egui::lerp(START_SCALE..=1.0, appear);
+    let rect = Rect::from_center_size(centre.lerp(home.center(), glide), Vec2::splat(size));
+    let bars = std::array::from_fn(|i| {
+        let start = BARS_FROM + i as f64 * BAR_STAGGER;
+        step((start, BAR_LENGTH), elapsed, OVERSHOOT)
+    });
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::NULL.with("intro"));
+    paint_mark(&ctx.layer_painter(layer), rect, bars, appear);
+}
+
+/// Progress through one step of the timeline, eased: 0 before it starts, 1 once it's done.
+fn step((start, length): (f64, f64), elapsed: f64, curve: [f32; 4]) -> f32 {
+    bezier(curve, ((elapsed - start) / length).clamp(0.0, 1.0) as f32)
+}
+
+/// A CSS `cubic-bezier(x1, y1, x2, y2)` timing curve at time `t`: find where the curve's x reaches
+/// `t` (x only grows, so halving the interval finds it), then return the curve's y there.
+fn bezier([x1, y1, x2, y2]: [f32; 4], t: f32) -> f32 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    if t >= 1.0 {
+        return 1.0;
+    }
+    let at = |a: f32, b: f32, s: f32| {
+        let u = 1.0 - s;
+        3.0 * u * u * s * a + 3.0 * u * s * s * b + s * s * s
+    };
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let mid = (lo + hi) / 2.0;
+        if at(x1, x2, mid) < t {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    at(y1, y2, (lo + hi) / 2.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curves_match_their_css_definitions() {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.002;
+        // linear: cubic-bezier(0, 0, 1, 1) is y = x.
+        assert!(close(bezier([0.0, 0.0, 1.0, 1.0], 0.3), 0.3));
+        // CSS `ease-in-out` (0.42, 0, 0.58, 1) is symmetric: halfway in time is halfway there.
+        assert!(close(bezier([0.42, 0.0, 0.58, 1.0], 0.5), 0.5));
+        // The strong ease-out is most of the way there early on, and ends exactly at 1.
+        assert!(bezier(EASE_OUT, 0.3) > 0.8 && bezier(EASE_OUT, 1.0) == 1.0);
+        // easeOutBack overshoots, then lands.
+        assert!((0..=100).any(|i| bezier(OVERSHOOT, i as f32 / 100.0) > 1.05));
+    }
+
+    #[test]
+    fn the_timeline_starts_empty_and_ends_settled() {
+        assert_eq!(content(0.0), (0.0, 0.0));
+        assert_eq!(content(END), (1.0, 1.0));
+        assert_eq!(step(PICK, 0.0, EASE_OUT), 0.0);
+        // Everything has landed by END, the last bar included.
+        let last_bar = BARS_FROM + 4.0 * BAR_STAGGER + BAR_LENGTH;
+        for done in [
+            PICK.0 + PICK.1,
+            GLIDE.0 + GLIDE.1,
+            last_bar,
+            BODY.0 + BODY.1,
+        ] {
+            assert!(done <= END, "{done} ends after END");
+        }
+    }
+}

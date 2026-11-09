@@ -224,6 +224,26 @@ pub fn save(research: &Research) -> Result<(), String> {
 pub struct Settings {
     pub tavily_key: String,
     pub light: bool,
+    /// When the startup intro plays.
+    pub intro: Intro,
+    /// The version that last played it, so "after updates" knows when there's a new one.
+    pub intro_seen: String,
+}
+
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+pub enum Intro {
+    #[default]
+    EveryLaunch,
+    AfterUpdate,
+}
+
+impl Settings {
+    /// Whether the intro plays when `version` opens. Records that it did, for "after updates".
+    pub fn intro_now(&mut self, version: &str) -> bool {
+        let new = self.intro_seen != version;
+        self.intro_seen = version.to_string();
+        self.intro == Intro::EveryLaunch || new
+    }
 }
 
 pub fn load_settings() -> Settings {
@@ -266,6 +286,28 @@ mod tests {
         assert_eq!(
             song_from_title("Song (Live) (Official Video)"),
             "Song (Live)"
+        );
+    }
+
+    #[test]
+    fn intro_plays_every_launch_or_once_per_new_version() {
+        let mut every = Settings::default();
+        assert!(every.intro_now("0.5.0.5") && every.intro_now("0.5.0.5"));
+        let mut after = Settings {
+            intro: Intro::AfterUpdate,
+            ..Settings::default()
+        };
+        assert!(
+            after.intro_now("0.5.0.5"),
+            "first launch of a version plays it"
+        );
+        assert!(!after.intro_now("0.5.0.5"), "the next launch doesn't");
+        assert!(after.intro_now("0.5.0.6"), "an update plays it again");
+        // Settings files from before this field existed still load, with the intro on.
+        let old: Settings = serde_json::from_str(r#"{"tavily_key":"k","light":true}"#).unwrap();
+        assert_eq!(
+            (old.intro, old.tavily_key.as_str()),
+            (Intro::EveryLaunch, "k")
         );
     }
 

@@ -6,6 +6,7 @@ mod analysis;
 mod decode;
 mod fetch;
 mod hardware;
+mod intro;
 mod look;
 mod model;
 mod research;
@@ -58,11 +59,18 @@ fn main() -> eframe::Result {
             window_icon(cc);
             egui_extras::install_image_loaders(&cc.egui_ctx);
             cc.egui_ctx.set_fonts(fonts());
-            let settings = research::load_settings();
+            let mut settings = research::load_settings();
             apply_theme(&cc.egui_ctx, settings.light);
+            let seen = settings.intro_seen.clone();
+            let intro_queued = settings.intro_now(VERSION);
+            if settings.intro_seen != seen {
+                let _ = research::save_settings(&settings);
+            }
             let mut app = App {
                 rig: rig::load(),
                 tavily_key: settings.tavily_key,
+                intro_queued,
+                intro_choice: settings.intro,
                 ..App::default()
             };
             app.check_updates(&cc.egui_ctx);
@@ -121,6 +129,10 @@ struct App {
     shown_at: f64,
     /// The old background while light and dark mode crossfade.
     theme_fade: Option<(Color32, f64)>,
+    /// The startup intro: queued until the first frame, then when it started; and when it plays.
+    intro_queued: bool,
+    intro_at: Option<f64>,
+    intro_choice: research::Intro,
     /// Read once, the first time the AI is needed.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
     /// The local AI reading the research pages: the page it's on (0 while it loads), Stop, and any error.
@@ -678,6 +690,32 @@ impl App {
 
         ui.add_space(14.0);
         card(ui, |ui| {
+            ui.label(semibold("Startup", 17.0));
+            ui.label(
+                RichText::new("When GigEyes opens, its logo plays a short intro. Click or press any key to skip it.")
+                    .size(13.0)
+                    .weak(),
+            );
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                let options = [
+                    (research::Intro::EveryLaunch, "Every launch"),
+                    (research::Intro::AfterUpdate, "After updates"),
+                ];
+                if segmented(ui, "intro", &mut self.intro_choice, &options) {
+                    let mut settings = research::load_settings();
+                    settings.intro = self.intro_choice;
+                    self.key_note = research::save_settings(&settings).err();
+                }
+                ui.add_space(12.0);
+                if ui.button("Play it now").clicked() {
+                    self.intro_at = Some(ctx.input(|i| i.time));
+                }
+            });
+        });
+
+        ui.add_space(14.0);
+        card(ui, |ui| {
             ui.label(semibold("Song research", 17.0));
             ui.label(
                 RichText::new("GigEyes searches the web with your own Tavily key. The free plan has 1,000 searches a month and needs no card.")
@@ -1105,6 +1143,26 @@ impl eframe::App for App {
                 Err(e) => self.update_note = Some(e),
             }
         }
+        if std::mem::take(&mut self.intro_queued) {
+            self.intro_at = Some(now);
+        }
+        // Any key or a dropped file skips the intro (a click is caught below, over the intro).
+        let skip = ctx.input(|i| {
+            !i.raw.dropped_files.is_empty()
+                || i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+        });
+        let intro = self
+            .intro_at
+            .map(|at| now - at)
+            .filter(|&elapsed| elapsed < intro::END && !skip);
+        if intro.is_none() {
+            self.intro_at = None;
+        }
+        let (head_in, body_in) = intro.map_or((1.0, 1.0), intro::content);
+        let mut home = egui::Rect::NOTHING;
+
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let has_result = matches!(self.state, State::Done(..));
         if (self.screen, has_result) != self.shown {
@@ -1126,24 +1184,46 @@ impl eframe::App for App {
                 // One readable column, centred on wide windows; the scrollbar stays at the window's edge.
                 let side = ((ui.available_width() - MAX_WIDTH) / 2.0).max(32.0);
                 let width = ui.available_width() - 2.0 * side;
-                column(ui, side, width, |ui| header(ui, &mut self.screen));
+                column(ui, side, width, |ui| {
+                    home = settle(ui, head_in, |ui| {
+                        header(ui, &mut self.screen, intro.is_none())
+                    });
+                });
                 ui.add_space(20.0);
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
                         column(ui, side, width, |ui| {
-                            ui.add_space(4.0);
-                            self.update_banner(ui, &ctx);
-                            let since = self.shown_at;
-                            enter(ui, since, |ui| match self.screen {
-                                Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
-                                Screen::Rig => self.rig_view(ui),
-                                Screen::Settings => self.settings_view(ui, &ctx),
+                            settle(ui, body_in, |ui| {
+                                ui.add_space(4.0);
+                                self.update_banner(ui, &ctx);
+                                let since = self.shown_at;
+                                enter(ui, since, |ui| match self.screen {
+                                    Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
+                                    Screen::Rig => self.rig_view(ui),
+                                    Screen::Settings => self.settings_view(ui, &ctx),
+                                });
+                                ui.add_space(32.0);
                             });
-                            ui.add_space(32.0);
                         });
                     });
             });
+
+        if let Some(elapsed) = intro {
+            // Over the whole window while it plays: the app underneath isn't clickable yet, and a
+            // click skips to it.
+            let cover = egui::Area::new(egui::Id::NULL.with("intro-cover"))
+                .order(egui::Order::Foreground)
+                .fixed_pos(ctx.content_rect().min)
+                .show(&ctx, |ui| {
+                    ui.allocate_response(ctx.content_rect().size(), Sense::click())
+                });
+            if cover.inner.clicked() {
+                self.intro_at = None;
+            }
+            intro::logo(&ctx, elapsed, home);
+            ctx.request_repaint();
+        }
 
         let drop = ctx.animate_bool_with_time(egui::Id::NULL.with("drop"), hovering, secs(0.15));
         if drop > 0.0 {
@@ -1194,9 +1274,14 @@ fn icon(source: ImageSource<'static>, size: f32, tint: Color32) -> egui::Image<'
         .tint(tint)
 }
 
-fn header(ui: &mut egui::Ui, screen: &mut Screen) {
+/// Returns where the mark sits, for the intro to land on. `show_mark` is false while the intro's own
+/// pick is still on its way there.
+fn header(ui: &mut egui::Ui, screen: &mut Screen, show_mark: bool) -> egui::Rect {
     ui.horizontal(|ui| {
-        mark(ui, 40.0);
+        let (home, _) = ui.allocate_exact_size(Vec2::splat(40.0), Sense::hover());
+        if show_mark {
+            paint_mark(&ui.painter_at(home), home, [1.0; 5], 1.0);
+        }
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.label(semibold("GigEyes", 24.0));
@@ -1214,7 +1299,9 @@ fn header(ui: &mut egui::Ui, screen: &mut Screen) {
                 ],
             );
         });
-    });
+        home
+    })
+    .inner
 }
 
 /// Five bars moving like a level meter while a file is being read.
