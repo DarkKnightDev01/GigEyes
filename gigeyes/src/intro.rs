@@ -1,7 +1,7 @@
 //! The startup intro, so GigEyes doesn't just pop up. The amber pick fades and scales in, its five
 //! bars rise one after another like a level meter and "GigEyes" fades in underneath; the name fades
 //! away, then the pick glides into its place in the header while the header and the screen below
-//! settle in. 1.6 seconds; a click, a key or a dropped file skips it. It plays even when Windows animations are off: that's how the user asked for it.
+//! settle in. 3 seconds; a click, a key or a dropped file skips it. It plays even when Windows animations are off: that's how the user asked for it.
 
 use crate::look::{ink, paint_mark};
 use eframe::egui::{self, Rect, Vec2};
@@ -13,17 +13,17 @@ const EASE_IN_OUT: [f32; 4] = [0.77, 0.0, 0.175, 1.0];
 const OVERSHOOT: [f32; 4] = [0.34, 1.56, 0.64, 1.0];
 
 /// (start, length) in seconds from the first frame.
-const PICK: (f64, f64) = (0.05, 0.40);
-const BARS_FROM: f64 = 0.22;
-const BAR_STAGGER: f64 = 0.045;
-const BAR_LENGTH: f64 = 0.26;
-/// The name arrives as the bars finish, holds, and leaves faster than it came.
-const NAME_IN: (f64, f64) = (0.50, 0.30);
-const NAME_OUT: (f64, f64) = (1.00, 0.20);
-const GLIDE: (f64, f64) = (1.12, 0.40);
-const HEADER: (f64, f64) = (1.24, 0.30);
-const BODY: (f64, f64) = (1.32, 0.30);
-pub const END: f64 = 1.62;
+const PICK: (f64, f64) = (0.05, 0.50);
+const BARS_FROM: f64 = 0.25;
+const BAR_STAGGER: f64 = 0.05;
+const BAR_LENGTH: f64 = 0.30;
+/// The name arrives as the bars finish, holds for about a second, and leaves faster than it came.
+const NAME_IN: (f64, f64) = (0.65, 0.45);
+const NAME_OUT: (f64, f64) = (2.20, 0.30);
+const GLIDE: (f64, f64) = (2.45, 0.50);
+const HEADER: (f64, f64) = (2.60, 0.30);
+const BODY: (f64, f64) = (2.70, 0.30);
+pub const END: f64 = 3.00;
 /// The pick's size in the middle of the window, before it glides into its 40 px header slot.
 const BIG: f32 = 120.0;
 /// It starts a little small, never from nothing.

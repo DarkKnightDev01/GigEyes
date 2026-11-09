@@ -4,7 +4,9 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.5.1.1:** the intro takes a moment longer (1.6 seconds): once the pick has formed, "GigEyes" fades in underneath it, holds, and fades away before the pick glides into the header.
+**New in 0.5.1.2:** the intro is 3 seconds. The pick and its bars arrive as quickly as before; "GigEyes" now stays under it for about a second longer, then the pick glides into the header at a calmer pace. Click or press any key to skip it, or set it to play only after updates in **Settings → Startup**.
+
+**In 0.5.1.1:** the intro takes a moment longer (1.6 seconds): once the pick has formed, "GigEyes" fades in underneath it, holds, and fades away before the pick glides into the header.
 
 **In 0.5.1: a startup intro.** GigEyes no longer just pops up. The amber pick springs in, its bars rise like a level meter, then it glides into its place in the header while the app settles in. Click or press any key to skip it. **Settings → Startup** chooses whether it plays every launch or only after an update, and **Play it now** replays it. It plays even when Windows' "Show animations" is off.
 
