@@ -1,9 +1,9 @@
 //! The startup intro, so GigEyes doesn't just pop up. The amber pick fades and scales in, its five
-//! bars rise one after another like a level meter, then it glides into its place in the header while
-//! the header and the screen below settle in. About a second; a click, a key or a dropped file skips
-//! it. It plays even when Windows animations are off: that's how the user asked for it.
+//! bars rise one after another like a level meter and "GigEyes" fades in underneath; the name fades
+//! away, then the pick glides into its place in the header while the header and the screen below
+//! settle in. 1.6 seconds; a click, a key or a dropped file skips it. It plays even when Windows animations are off: that's how the user asked for it.
 
-use crate::look::paint_mark;
+use crate::look::{ink, paint_mark};
 use eframe::egui::{self, Rect, Vec2};
 
 /// Strong ease-out for things arriving, strong ease-in-out for moving across the screen
@@ -17,10 +17,13 @@ const PICK: (f64, f64) = (0.05, 0.40);
 const BARS_FROM: f64 = 0.22;
 const BAR_STAGGER: f64 = 0.045;
 const BAR_LENGTH: f64 = 0.26;
-const GLIDE: (f64, f64) = (0.62, 0.40);
-const HEADER: (f64, f64) = (0.74, 0.30);
-const BODY: (f64, f64) = (0.82, 0.30);
-pub const END: f64 = 1.12;
+/// The name arrives as the bars finish, holds, and leaves faster than it came.
+const NAME_IN: (f64, f64) = (0.50, 0.30);
+const NAME_OUT: (f64, f64) = (1.00, 0.20);
+const GLIDE: (f64, f64) = (1.12, 0.40);
+const HEADER: (f64, f64) = (1.24, 0.30);
+const BODY: (f64, f64) = (1.32, 0.30);
+pub const END: f64 = 1.62;
 /// The pick's size in the middle of the window, before it glides into its 40 px header slot.
 const BIG: f32 = 120.0;
 /// It starts a little small, never from nothing.
@@ -48,7 +51,21 @@ pub fn logo(ctx: &egui::Context, elapsed: f64, home: Rect) {
         step((start, BAR_LENGTH), elapsed, OVERSHOOT)
     });
     let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::NULL.with("intro"));
-    paint_mark(&ctx.layer_painter(layer), rect, bars, appear);
+    let painter = ctx.layer_painter(layer);
+    paint_mark(&painter, rect, bars, appear);
+
+    // The name under the pick: fades in rising from 8 px below, then fades out where it stands.
+    let shown = step(NAME_IN, elapsed, EASE_OUT) * (1.0 - step(NAME_OUT, elapsed, EASE_OUT));
+    if shown > 0.0 {
+        let rise = 8.0 * (1.0 - step(NAME_IN, elapsed, EASE_OUT));
+        painter.text(
+            centre + Vec2::new(0.0, BIG * 0.5 + 18.0 + rise),
+            egui::Align2::CENTER_TOP,
+            "GigEyes",
+            egui::FontId::new(30.0, egui::FontFamily::Name("semibold".into())),
+            ink().gamma_multiply(shown),
+        );
+    }
 }
 
 /// Progress through one step of the timeline, eased: 0 before it starts, 1 once it's done.
@@ -113,5 +130,8 @@ mod tests {
         ] {
             assert!(done <= END, "{done} ends after END");
         }
+        // The name is fully in before it starts to leave, and nearly gone before the pick moves off.
+        assert!(NAME_IN.0 + NAME_IN.1 < NAME_OUT.0);
+        assert!(step(NAME_OUT, GLIDE.0, EASE_OUT) > 0.9);
     }
 }

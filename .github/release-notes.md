@@ -4,7 +4,9 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.5.1: a startup intro.** GigEyes no longer just pops up. The amber pick springs in, its bars rise like a level meter, then it glides into its place in the header while the app settles in, in about a second. Click or press any key to skip it. **Settings → Startup** chooses whether it plays every launch or only after an update, and **Play it now** replays it. It plays even when Windows' "Show animations" is off.
+**New in 0.5.1.1:** the intro takes a moment longer (1.6 seconds): once the pick has formed, "GigEyes" fades in underneath it, holds, and fades away before the pick glides into the header.
+
+**In 0.5.1: a startup intro.** GigEyes no longer just pops up. The amber pick springs in, its bars rise like a level meter, then it glides into its place in the header while the app settles in. Click or press any key to skip it. **Settings → Startup** chooses whether it plays every launch or only after an update, and **Play it now** replays it. It plays even when Windows' "Show animations" is off.
 
 **In 0.5.0.4:** your Tavily key stays saved. It used to be saved only when you clicked **Save key**, but research worked straight after pasting it, so it was easy to skip the button and lose the key at the next restart or update. Now it saves the moment you paste or type it, and the button is gone. Every build also checks on Windows that the key survives updating.
 
