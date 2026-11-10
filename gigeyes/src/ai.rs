@@ -49,13 +49,40 @@ For each piece of gear give:\n\
 - quote: one sentence copied word for word from the page that names this gear. Never reword, shorten or fix it.\n\
 Leave out gear the page doesn't tie to this song, album or tour, gear used only by the bass player, singer or drummer, and anything you aren't sure the page says. If the page names no gear, return an empty list.";
 
-const PLUGIN_PROMPT: &str = "You read one web page about an audio plugin. List the real-world amps, cabinets, pedals and effects the page says this plugin models, emulates or is based on.\n\
-For each one give:\n\
-- gear: the real unit's make and model as the page writes them, e.g. \"Mesa/Boogie Dual Rectifier\", not the plugin's own name for it\n\
-- kind: amp, cabinet, pedal or effect\n\
-- model: the plugin's own name for that model if the page gives one, otherwise an empty string\n\
-- quote: one sentence copied word for word from the page that names the real unit. Never reword, shorten or fix it.\n\
-Leave out gear the page doesn't say this plugin models, other products, and anything you aren't sure the page says. If the page names none, return an empty list.";
+const PLUGIN_PROMPT: &str = "You read one web page about an audio plugin. Report what the page says about this plugin.\n\
+- type: what kind of plugin it is, from the list; \"unknown\" if the page doesn't say\n\
+- type_quote: one sentence copied word for word from the page that shows its type, or an empty string\n\
+- facts: up to 8 short facts about what the plugin does and how it sounds and behaves, e.g. \"Tightens the low end before a high-gain amp\" or \"Cleans up when the guitar's volume is rolled back\". Each at most 12 words, in plain words, with quote: the sentence from the page it comes from, copied word for word.\n\
+- found: the real-world amps, cabinets, pedals and effects the page says this plugin models, emulates or is based on. gear: the real unit's make and model as the page writes them, not the plugin's own name for it; kind: amp, cabinet, pedal or effect; model: the plugin's own name for that model if the page gives one, otherwise an empty string; quote: one sentence copied word for word from the page that names the real unit.\n\
+Never reword, shorten or fix a quote. Leave out prices, system requirements, other products, and anything you aren't sure the page says about this plugin. If the page says nothing about it, return unknown and empty lists.";
+
+/// The kinds of plugin the AI may name.
+const PLUGIN_TYPES: [&str; 20] = [
+    "amp sim",
+    "preamp",
+    "cabinet or IR loader",
+    "overdrive",
+    "distortion",
+    "fuzz",
+    "boost",
+    "compressor",
+    "EQ",
+    "noise gate",
+    "delay",
+    "reverb",
+    "modulation",
+    "pitch",
+    "wah or filter",
+    "multi-effect suite",
+    "tuner",
+    "utility",
+    "other",
+    "unknown",
+];
+/// `Finding::kind` of a plugin's type (its `gear` is one of PLUGIN_TYPES) and of a fact about
+/// what it does (its `gear` is the fact).
+pub const TYPE: &str = "type";
+pub const FACT: &str = "fact";
 
 /// The local AI, loaded and ready, for as long as `session` runs its work.
 pub struct Session<'a> {
@@ -357,7 +384,7 @@ fn ask(
             4000,
         ),
     };
-    let schema = serde_json::json!({
+    let mut schema = serde_json::json!({
         "type": "object",
         "properties": {"found": {"type": "array", "maxItems": max, "items": {
             "type": "object",
@@ -371,6 +398,16 @@ fn ask(
         }}},
         "required": ["found"]
     });
+    if task == Task::Plugin {
+        schema["properties"]["type"] = serde_json::json!({"type": "string", "enum": PLUGIN_TYPES});
+        schema["properties"]["type_quote"] = serde_json::json!({"type": "string"});
+        schema["properties"]["facts"] = serde_json::json!({"type": "array", "maxItems": 8, "items": {
+            "type": "object",
+            "properties": {"fact": {"type": "string"}, "quote": {"type": "string"}},
+            "required": ["fact", "quote"]
+        }});
+        schema["required"] = serde_json::json!(["type", "type_quote", "facts", "found"]);
+    }
     let body = serde_json::json!({
         "messages": [
             {"role": "system", "content": prompt},
@@ -390,12 +427,42 @@ fn ask(
         .as_str()
         .ok_or("no answer")?;
     #[derive(Deserialize)]
+    struct Fact {
+        fact: String,
+        quote: String,
+    }
+    #[derive(Deserialize)]
     struct Answer {
+        #[serde(default, rename = "type")]
+        kind: String,
+        #[serde(default)]
+        type_quote: String,
+        #[serde(default)]
+        facts: Vec<Fact>,
         found: Vec<Finding>,
     }
-    serde_json::from_str::<Answer>(content)
-        .map(|a| a.found)
-        .map_err(|e| e.to_string())
+    let answer: Answer = serde_json::from_str(content).map_err(|e| e.to_string())?;
+    // The type and the facts travel as findings too, so the same quote check covers them.
+    let note = |gear: String, kind: &str, quote: String| Finding {
+        gear,
+        kind: kind.into(),
+        settings: String::new(),
+        quote,
+        url: String::new(),
+        model: String::new(),
+    };
+    let mut all = vec![];
+    if PLUGIN_TYPES.contains(&answer.kind.as_str()) && answer.kind != "unknown" {
+        all.push(note(answer.kind, TYPE, answer.type_quote));
+    }
+    all.extend(
+        answer
+            .facts
+            .into_iter()
+            .map(|f| note(f.fact, FACT, f.quote)),
+    );
+    all.extend(answer.found);
+    Ok(all)
 }
 
 /// Lowercase, one space between words, and plain quote marks and dashes, so a quote still matches a
@@ -421,7 +488,13 @@ fn keep(mut f: Finding, page: &str, url: &str) -> Option<Finding> {
     let names_it = norm(&f.gear)
         .split(|c: char| !c.is_alphanumeric())
         .any(|word| word.chars().count() >= 3 && quote.contains(word));
-    if quote.chars().count() < 15 || !names_it || !page.contains(&quote) {
+    // A type or a fact is the AI's wording, so its quote needn't repeat it; gear must be named.
+    let worded = f.kind == TYPE || f.kind == FACT;
+    if quote.chars().count() < 15
+        || !(names_it || worded)
+        || !page.contains(&quote)
+        || f.gear.trim().is_empty()
+    {
         return None;
     }
     f.gear = f.gear.trim().to_string();
@@ -590,7 +663,10 @@ mod tests {
     #[test]
     fn a_plugin_lookup_asks_for_models_and_keeps_their_plugin_names() {
         let (base, server) = fake_server(vec![
-            r#"{"found":[
+            r#"{"type":"amp sim","type_quote":"Helix Native is an amp and effects plugin.",
+              "facts":[{"fact":"Runs whole signal chains","quote":"Helix Native is an amp and effects plugin."},
+                       {"fact":"Sounds like a tube amp","quote":"This sentence is nowhere on the page."}],
+              "found":[
                 {"gear":"Mesa/Boogie Dual Rectifier","kind":"amp","model":"Cali Rectifire","quote":"Cali Rectifire is based on a Mesa/Boogie Dual Rectifier."},
                 {"gear":"Marshall JCM800","kind":"amp","model":"","quote":"It also has a Marshall JCM800."}]}"#,
         ]);
@@ -598,7 +674,7 @@ mod tests {
             song: "Helix Native".into(),
             sources: vec![source(
                 "https://line6.com/helix-models/",
-                "Models. Cali Rectifire is based on a Mesa/Boogie Dual Rectifier. More amps.",
+                "Helix Native is an amp and effects plugin. Cali Rectifire is based on a Mesa/Boogie Dual Rectifier. More amps.",
             )],
             searched_at: 0,
             findings: None,
@@ -612,11 +688,20 @@ mod tests {
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(found.len(), 1, "the JCM800 sentence isn't on the page");
+        let got: Vec<(&str, &str)> = found
+            .iter()
+            .map(|f| (f.kind.as_str(), f.gear.as_str()))
+            .collect();
         assert_eq!(
-            (found[0].gear.as_str(), found[0].model.as_str()),
-            ("Mesa/Boogie Dual Rectifier", "Cali Rectifire")
+            got,
+            [
+                (TYPE, "amp sim"),
+                (FACT, "Runs whole signal chains"),
+                ("amp", "Mesa/Boogie Dual Rectifier")
+            ],
+            "the made-up fact and the JCM800 have no sentence on the page"
         );
+        assert_eq!(found[2].model, "Cali Rectifire");
         let request: serde_json::Value = serde_json::from_str(&server.join().unwrap()).unwrap();
         let user = request["messages"][1]["content"].as_str().unwrap();
         assert!(user.starts_with("Plugin: Helix Native"), "{user}");

@@ -111,10 +111,10 @@ pub fn search(key: &str, song: &str) -> Result<Research, String> {
     search_at(TAVILY, key, song, &query_for(song), 8, TEXT_LIMIT)
 }
 
-/// Pages on what a plugin models: its maker's page and model lists. `subject` in the result is the
+/// Pages on what a plugin is, does and models: its maker's page, manuals and reviews. `subject` in the result is the
 /// plugin's name.
 pub fn search_plugin(key: &str, name: &str, vendor: &str) -> Result<Research, String> {
-    let query = format!("\"{name}\" {vendor} plugin amp models based on");
+    let query = format!("\"{name}\" {vendor} plugin what it does sound features based on");
     search_at(TAVILY, key, name, &query, 5, PLUGIN_TEXT_LIMIT)
 }
 

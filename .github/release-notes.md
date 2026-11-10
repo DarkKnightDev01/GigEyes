@@ -4,7 +4,12 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.1: fixes**
+**New in 0.7.2: lookups learn what a plugin is and does**
+- A plugin lookup now finds out **what kind of plugin it is** (amp sim, overdrive, compressor, reverb and so on) and **what it does and how it behaves**, as short facts like "Tightens the low end, pushes the mids". The real gear it models is still found too.
+- Every fact is backed by the sentence from the page it comes from. Facts whose sentence isn't really on the page are dropped. **Where this comes from** under each plugin shows the sentences and links, and a wrong one can be removed.
+- Plugins looked up with 0.7 or 0.7.1 are looked up again by themselves, one web search each.
+
+**In 0.7.1: fixes**
 - **The AI can't be left running.** Closing GigEyes, or updating it, while the AI was reading or looking plugins up used to leave the AI server running in the background, holding memory. Windows now ends it together with GigEyes.
 - **Plugin lookups are faster and more complete.** The AI now loads once for a whole batch of plugins, not once per plugin, and reads long pages (a suite's full model list) in parts, where it used to stop after the first 20,000 characters.
 - **Lookups pause on a problem.** With no internet, a rejected key or no searches left, lookups used to fail for every plugin, using a search each. Now they pause with one message and a **Look up now** button.

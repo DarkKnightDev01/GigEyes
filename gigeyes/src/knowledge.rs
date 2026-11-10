@@ -20,8 +20,36 @@ pub struct Known {
     pub plugin: String,
     /// Unix seconds when it was looked up.
     pub looked_up_at: u64,
-    /// `gear` is the real unit, `model` the plugin's own name for it, `quote` and `url` the proof.
+    /// Everything found, each with its `quote` and `url` as proof: the plugin's type (kind
+    /// `ai::TYPE`), facts about what it does (`ai::FACT`), and the real gear it models (`gear` is
+    /// the real unit, `model` the plugin's own name for it).
     pub models: Vec<Finding>,
+    /// Looked up for its type and what it does too. False for lookups from 0.7 and 0.7.1, which
+    /// only asked what it models: those are looked up again.
+    #[serde(default)]
+    pub profile: bool,
+}
+
+impl Known {
+    /// What kind of plugin it is, e.g. "overdrive", if a page said.
+    pub fn kind(&self) -> Option<&str> {
+        self.models
+            .iter()
+            .find(|m| m.kind == crate::ai::TYPE)
+            .map(|m| m.gear.as_str())
+    }
+
+    /// Short facts about what it does and how it behaves.
+    pub fn facts(&self) -> impl Iterator<Item = &Finding> {
+        self.models.iter().filter(|m| m.kind == crate::ai::FACT)
+    }
+
+    /// The real gear it models.
+    pub fn gear(&self) -> impl Iterator<Item = &Finding> {
+        self.models
+            .iter()
+            .filter(|m| m.kind != crate::ai::TYPE && m.kind != crate::ai::FACT)
+    }
 }
 
 /// Gear makers, so "Marshall" in front of a model is read as the maker, not as part of the model.
@@ -134,6 +162,7 @@ impl Knowledge {
             plugin: plugin.to_string(),
             looked_up_at,
             models,
+            profile: true,
         });
     }
 
@@ -150,7 +179,7 @@ impl Knowledge {
         let found = self
             .plugins
             .iter()
-            .flat_map(|k| &k.models)
+            .flat_map(|k| k.gear())
             .filter_map(|m| words(&m.gear).into_iter().next())
             .filter(|w| !w.chars().any(|c| c.is_ascii_digit()) && !GENERIC.contains(&w.as_str()));
         MAKERS.iter().map(|m| m.to_string()).chain(found).collect()

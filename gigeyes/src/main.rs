@@ -658,7 +658,7 @@ impl App {
     fn rig_view(&mut self, ui: &mut egui::Ui) {
         ui.label(semibold("Your rig", 22.0));
         ui.label(
-            RichText::new("Tick the plugins you play through, and the ones GigEyes should look up: it searches the web for the real gear each one models, the local AI reads the pages, and what it finds stays on this PC. GigEyes reads plugin names from disk; it never loads or changes them.")
+            RichText::new("Tick the plugins you play through, and the ones GigEyes should look up: it searches the web for what kind of plugin each one is, what it does and what real gear it models, the local AI reads the pages, and what it finds stays on this PC. GigEyes reads plugin names from disk; it never loads or changes them.")
                 .weak(),
         );
         ui.add_space(12.0);
@@ -833,16 +833,32 @@ impl App {
                                 }
                                 match knowledge.about(&plugin.name) {
                                     Some(known) if !known.models.is_empty() => {
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{}  ·  found on the web",
-                                                models_line(known)
-                                            ))
-                                            .size(13.0),
-                                        );
+                                        let mut kind = known.kind().unwrap_or_default().to_string();
+                                        if let Some(first) = kind.get_mut(..1) {
+                                            first.make_ascii_uppercase();
+                                        }
+                                        let tag = if kind.is_empty() {
+                                            "Found on the web".to_string()
+                                        } else {
+                                            format!("{kind}  ·  found on the web")
+                                        };
+                                        ui.label(RichText::new(tag).size(13.0));
+                                        // The first few facts; all of them are in the list below.
+                                        for fact in known.facts().take(5) {
+                                            ui.label(
+                                                RichText::new(format!("•  {}", fact.gear))
+                                                    .size(13.0),
+                                            );
+                                        }
+                                        let models = models_line(known);
+                                        if !models.is_empty() {
+                                            ui.label(
+                                                RichText::new(format!("•  {models}")).size(13.0),
+                                            );
+                                        }
                                         egui::CollapsingHeader::new(
                                             RichText::new(format!(
-                                                "What it models ({})",
+                                                "Where this comes from ({})",
                                                 known.models.len()
                                             ))
                                             .size(13.0),
@@ -864,9 +880,12 @@ impl App {
                                                             .size(13.0),
                                                         );
                                                     }
-                                                    ui.label(
-                                                        RichText::new(&m.kind).size(12.0).weak(),
-                                                    );
+                                                    let what = match m.kind.as_str() {
+                                                        ai::TYPE => "what kind it is",
+                                                        ai::FACT => "what it does",
+                                                        gear => gear,
+                                                    };
+                                                    ui.label(RichText::new(what).size(12.0).weak());
                                                 });
                                                 ui.label(
                                                     RichText::new(format!(
@@ -905,7 +924,7 @@ impl App {
                                         ui.horizontal_wrapped(|ui| {
                                             ui.label(
                                                 RichText::new(
-                                                    "Nothing on the web says what it models.",
+                                                    "The pages found say nothing GigEyes could check about it.",
                                                 )
                                                 .size(13.0)
                                                 .weak(),
@@ -975,7 +994,7 @@ impl App {
             .flatten()
             .filter(|p| {
                 p.lookup
-                    && self.knowledge.about(&p.name).is_none()
+                    && self.knowledge.about(&p.name).is_none_or(|k| !k.profile)
                     && !self.lookup_failed.contains_key(&p.name)
             })
             .map(|p| (p.name.clone(), p.vendor.clone()))
@@ -1085,7 +1104,7 @@ impl App {
             card(ui, |ui| {
                 ui.horizontal(|ui| {
                     listening(ui);
-                    ui.label(format!("Looking up what {name} models ({i} of {n})…"));
+                    ui.label(format!("Looking up {name} ({i} of {n})…"));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Stop").clicked() {
                             self.lookup_cancel.store(true, Ordering::Relaxed);
@@ -1144,10 +1163,8 @@ impl App {
             }
             ui.add_space(6.0);
             ui.label(
-                RichText::new(
-                    "Do you play through it? Yes ticks it in Your rig and looks up what it models.",
-                )
-                .size(13.0),
+                RichText::new("Do you play through it? Yes ticks it in Your rig and looks it up.")
+                    .size(13.0),
             );
             ui.add_space(10.0);
             ui.horizontal(|ui| {
@@ -1217,7 +1234,7 @@ impl App {
             2 => {
                 ui.label(semibold("Your plugins", 22.0));
                 ui.label(
-                    RichText::new("Tick the plugins you play through, and the ones GigEyes should look up. Looking up searches the web for the real gear each plugin models and lets the local AI read the pages; it starts once the next two steps are done, and what it finds stays on this PC.")
+                    RichText::new("Tick the plugins you play through, and the ones GigEyes should look up. Looking up searches the web for what each plugin is, what it does and what real gear it models, and lets the local AI read the pages; it starts once the next two steps are done, and what it finds stays on this PC.")
                         .weak(),
                 );
                 ui.add_space(12.0);
@@ -1755,7 +1772,7 @@ fn apply_theme(ctx: &egui::Context, light: bool) {
 /// "Models the Mesa/Boogie Mark IIC+", or how many and a few of them, for a looked-up plugin.
 fn models_line(known: &knowledge::Known) -> String {
     let mut real: Vec<&str> = vec![];
-    for model in &known.models {
+    for model in known.gear() {
         let name = model.gear.split('(').next().unwrap_or_default().trim();
         if !real.contains(&name) {
             real.push(name);
@@ -1816,7 +1833,7 @@ fn in_your_rig(
         .map(|m| {
             let single = knowledge
                 .about(m.plugin)
-                .is_some_and(|k| k.models.len() == 1);
+                .is_some_and(|k| k.gear().count() == 1);
             match (single, m.model.model.is_empty()) {
                 (true, _) => m.plugin.to_string(), // a plugin that is that one amp
                 (false, false) => format!("{} ({})", m.plugin, m.model.model),
