@@ -57,16 +57,32 @@ For each one give:\n\
 - quote: one sentence copied word for word from the page that names the real unit. Never reword, shorten or fix it.\n\
 Leave out gear the page doesn't say this plugin models, other products, and anything you aren't sure the page says. If the page names none, return an empty list.";
 
-/// Starts the server, reads every page that has text, and stops the server again.
-/// `page` is set to the page being read (0 while the model loads). Setting `cancel` stops at once.
-pub fn read(
+/// The local AI, loaded and ready, for as long as `session` runs its work.
+pub struct Session<'a> {
+    base: &'a str,
+    cancel: &'a AtomicBool,
+}
+
+impl Session<'_> {
+    /// Read every page of `research` that has text. `page` is set to the page being read.
+    pub fn read(
+        &self,
+        research: &Research,
+        task: Task,
+        page: &AtomicUsize,
+    ) -> Result<Vec<Finding>, String> {
+        read_pages(self.base, research, task, page, self.cancel)
+    }
+}
+
+/// Starts the server, runs `work` once the model is loaded, and stops the server again: several
+/// reads in one `work` load the model once. Setting `cancel` stops at once.
+pub fn session<R>(
     model: &Model,
     gpu: bool,
-    research: &Research,
-    task: Task,
-    page: &AtomicUsize,
     cancel: &AtomicBool,
-) -> Result<Vec<Finding>, String> {
+    work: impl FnOnce(&Session) -> R,
+) -> Result<R, String> {
     let server = start(model, gpu)?;
     let done = AtomicBool::new(false);
     std::thread::scope(|s| {
@@ -80,11 +96,27 @@ pub fn read(
                 std::thread::sleep(Duration::from_millis(200));
             }
         });
-        let result = wait_ready(&server, cancel)
-            .and_then(|()| read_pages(&server.base, research, task, page, cancel));
+        let result = wait_ready(&server, cancel).map(|()| {
+            work(&Session {
+                base: &server.base,
+                cancel,
+            })
+        });
         done.store(true, Ordering::Relaxed);
         result
     })
+}
+
+/// One read with its own session. `page` is 0 while the model loads.
+pub fn read(
+    model: &Model,
+    gpu: bool,
+    research: &Research,
+    task: Task,
+    page: &AtomicUsize,
+    cancel: &AtomicBool,
+) -> Result<Vec<Finding>, String> {
+    session(model, gpu, cancel, |ai| ai.read(research, task, page))?
 }
 
 struct Server {
@@ -140,15 +172,55 @@ fn start(model: &Model, gpu: bool) -> Result<Server, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    // shortcut: if GigEyes itself crashes mid-read the server keeps running until closed in Task
-    // Manager; tie it to a Windows job object if that ever happens.
     let child = cmd
         .spawn()
         .map_err(|e| format!("Couldn't start the local AI: {e}"))?;
+    #[cfg(windows)]
+    end_with_gigeyes(&child);
     Ok(Server {
         child: Mutex::new(child),
         base: format!("http://127.0.0.1:{port}"),
     })
+}
+
+/// Put the server in a Windows job that ends its processes when GigEyes exits, however it exits:
+/// closed mid-read, updated or crashed, the AI never stays behind holding memory.
+#[cfg(windows)]
+fn end_with_gigeyes(child: &Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    // One job for the app's lifetime. Its handle is never closed, so Windows closes it when
+    // GigEyes exits, and that is what ends the server.
+    static JOB: OnceLock<Option<usize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| {
+        // SAFETY: plain Win32 calls; `info` is a correctly sized, zeroed struct that outlives the call.
+        unsafe {
+            let job = CreateJobObjectW(None, windows::core::PCWSTR::null()).ok()?;
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .ok()?;
+            Some(job.0 as usize)
+        }
+    });
+    if let Some(job) = *job {
+        // SAFETY: both handles are valid: the job lives for the whole run, the child is ours.
+        // If it fails the server just isn't tied to GigEyes; reading still works.
+        let _ = unsafe {
+            AssignProcessToJobObject(HANDLE(job as *mut _), HANDLE(child.as_raw_handle()))
+        };
+    }
 }
 
 /// Wait for the model to load: seconds from a fast drive, a minute or two from a slow one.
@@ -201,25 +273,29 @@ fn read_pages(
         .filter(|s| !s.text.trim().is_empty())
         .collect();
     let mut found: Vec<Finding> = Vec::new();
-    let mut failed = 0;
+    let (mut asked, mut failed) = (0, 0);
     for (i, source) in pages.iter().enumerate() {
         page.store(i + 1, Ordering::Relaxed);
-        match ask(&agent, base, &research.song, task, source) {
-            Ok(list) => {
-                let text = norm(&source.text);
-                for finding in list {
-                    if let Some(f) = keep(finding, &text, &source.url)
-                        && !found.iter().any(|g| same(g, &f))
-                    {
-                        found.push(f);
+        let text = norm(&source.text);
+        // A long page (a plugin's full model list) is read part by part.
+        for part in parts(&source.text) {
+            asked += 1;
+            match ask(&agent, base, &research.song, task, &source.title, part) {
+                Ok(list) => {
+                    for finding in list {
+                        if let Some(f) = keep(finding, &text, &source.url)
+                            && !found.iter().any(|g| same(g, &f))
+                        {
+                            found.push(f);
+                        }
                     }
                 }
+                Err(_) if cancel.load(Ordering::Relaxed) => return Err(STOPPED.into()),
+                Err(_) => failed += 1,
             }
-            Err(_) if cancel.load(Ordering::Relaxed) => return Err(STOPPED.into()),
-            Err(_) => failed += 1,
         }
     }
-    if failed > 0 && failed == pages.len() {
+    if failed > 0 && failed == asked {
         return Err(
             "The local AI couldn't read the pages. What it said is in ai.log in %LOCALAPPDATA%\\GigEyes."
                 .into(),
@@ -228,12 +304,35 @@ fn read_pages(
     Ok(found)
 }
 
+/// As much of a page as the model reads in one go: with the prompt and the answer it fits the
+/// 12,288-token context.
+const PART: usize = 20_000;
+
+/// `text` in pieces of at most PART characters, cut at a line end where there is one.
+fn parts(text: &str) -> Vec<&str> {
+    let mut parts = vec![];
+    let mut rest = text;
+    while let Some((end, _)) = rest.char_indices().nth(PART) {
+        let cut = rest[..end]
+            .rfind('\n')
+            .filter(|&at| at > end / 2)
+            .map_or(end, |at| at + 1);
+        parts.push(&rest[..cut]);
+        rest = &rest[cut..];
+    }
+    if !rest.trim().is_empty() {
+        parts.push(rest);
+    }
+    parts
+}
+
 fn ask(
     agent: &ureq::Agent,
     base: &str,
     subject: &str,
     task: Task,
-    source: &Source,
+    title: &str,
+    text: &str,
 ) -> Result<Vec<Finding>, String> {
     // The server only lets the model write JSON of this shape.
     let (prompt, label, kinds, detail, max, tokens) = match task {
@@ -275,7 +374,7 @@ fn ask(
     let body = serde_json::json!({
         "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": format!("{label}: {subject}\nPage: {}\n\n{}", source.title, source.text)},
+            {"role": "user", "content": format!("{label}: {subject}\nPage: {title}\n\n{text}")},
         ],
         "temperature": 0.2,
         "max_tokens": tokens,
@@ -528,5 +627,63 @@ mod tests {
             4,
             "plugins model amps, cabs, pedals, effects"
         );
+    }
+
+    #[test]
+    fn long_pages_are_read_in_parts_cut_at_line_ends() {
+        assert_eq!(parts("short page"), ["short page"]);
+        assert!(parts("  \n ").is_empty());
+        let line = "ä model line, forty characters long ok.\n"; // 40 characters, 41 bytes
+        let page = line.repeat(1200); // 48,000 characters
+        let cut = parts(&page);
+        assert_eq!(cut.len(), 3);
+        assert!(
+            cut.iter()
+                .all(|p| p.chars().count() <= PART && p.ends_with('\n'))
+        );
+        assert_eq!(cut.concat(), page, "nothing lost or doubled");
+        // No line ends at all: still cut, on a character boundary.
+        let wall = "ä".repeat(PART + 5);
+        assert_eq!(
+            parts(&wall)
+                .iter()
+                .map(|p| p.chars().count())
+                .collect::<Vec<_>>(),
+            [PART, 5]
+        );
+    }
+
+    #[test]
+    fn every_part_of_a_long_page_is_asked_about() {
+        let (base, server) = fake_server(vec![
+            r#"{"found":[{"gear":"Marshall JCM800","kind":"amp","model":"Brit 2203","quote":"Brit 2203 is based on the Marshall JCM800."}]}"#,
+            r#"{"found":[{"gear":"Klon Centaur","kind":"pedal","model":"Minotaur","quote":"Minotaur is based on the Klon Centaur."}]}"#,
+        ]);
+        let filler = "A line of the page that names nothing.\n".repeat(600);
+        let text = format!(
+            "Brit 2203 is based on the Marshall JCM800.\n{filler}Minotaur is based on the Klon Centaur.\n"
+        );
+        let research = Research {
+            song: "Helix Native".into(),
+            sources: vec![source("https://line6.com/helix-models/", &text)],
+            searched_at: 0,
+            findings: None,
+        };
+        let page = AtomicUsize::new(0);
+        let found = read_pages(
+            &base,
+            &research,
+            Task::Plugin,
+            &page,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let gear: Vec<&str> = found.iter().map(|f| f.gear.as_str()).collect();
+        assert_eq!(
+            gear,
+            ["Marshall JCM800", "Klon Centaur"],
+            "one from each part"
+        );
+        server.join().unwrap();
     }
 }

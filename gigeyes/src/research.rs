@@ -20,6 +20,8 @@ const SKIP_DOMAINS: [&str; 7] = [
 ];
 /// Page text kept per source for the AI step; full pages can be hundreds of kilobytes.
 const TEXT_LIMIT: usize = 20_000;
+/// A plugin's model list can be long and the AI reads it in parts, so more of each page is kept.
+const PLUGIN_TEXT_LIMIT: usize = 100_000;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Source {
@@ -27,7 +29,7 @@ pub struct Source {
     pub url: String,
     /// The search engine's short excerpt.
     pub snippet: String,
-    /// The page's cleaned text, cut to TEXT_LIMIT, for the AI step to read.
+    /// The page's cleaned text, cut to a limit, for the AI step to read.
     pub text: String,
 }
 
@@ -106,21 +108,28 @@ pub fn search(key: &str, song: &str) -> Result<Research, String> {
     if song.is_empty() {
         return Err("Type the artist and song first.".into());
     }
-    search_at(TAVILY, key, song, &query_for(song))
+    search_at(TAVILY, key, song, &query_for(song), 8, TEXT_LIMIT)
 }
 
 /// Pages on what a plugin models: its maker's page and model lists. `subject` in the result is the
 /// plugin's name.
 pub fn search_plugin(key: &str, name: &str, vendor: &str) -> Result<Research, String> {
     let query = format!("\"{name}\" {vendor} plugin amp models based on");
-    search_at(TAVILY, key, name, &query)
+    search_at(TAVILY, key, name, &query, 5, PLUGIN_TEXT_LIMIT)
 }
 
-fn search_at(base: &str, key: &str, subject: &str, query: &str) -> Result<Research, String> {
+fn search_at(
+    base: &str,
+    key: &str,
+    subject: &str,
+    query: &str,
+    results: usize,
+    text_limit: usize,
+) -> Result<Research, String> {
     let body = serde_json::json!({
         "query": query,
         "search_depth": "basic",
-        "max_results": 8,
+        "max_results": results,
         "include_raw_content": "text",
         "exclude_domains": SKIP_DOMAINS,
     });
@@ -153,7 +162,7 @@ fn search_at(base: &str, key: &str, subject: &str, query: &str) -> Result<Resear
                 .raw_content
                 .unwrap_or_default()
                 .chars()
-                .take(TEXT_LIMIT)
+                .take(text_limit)
                 .collect(),
         })
         .collect();
@@ -407,6 +416,8 @@ mod tests {
             " tvly-test ",
             "Gojira - Stranded",
             &query_for("Gojira - Stranded"),
+            8,
+            TEXT_LIMIT,
         )
         .unwrap();
         assert_eq!(research.sources.len(), 1, "the file: link is dropped");
@@ -423,7 +434,15 @@ mod tests {
     #[test]
     fn a_bad_key_gets_a_plain_message() {
         let (base, server) = fake_tavily("401 Unauthorized", r#"{"detail":"invalid"}"#);
-        let err = search_at(&base, "nope", "Some Song", &query_for("Some Song")).unwrap_err();
+        let err = search_at(
+            &base,
+            "nope",
+            "Some Song",
+            &query_for("Some Song"),
+            8,
+            TEXT_LIMIT,
+        )
+        .unwrap_err();
         server.join().unwrap();
         assert!(err.starts_with("Tavily didn't accept that key"), "{err}");
     }

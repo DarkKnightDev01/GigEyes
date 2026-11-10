@@ -73,11 +73,10 @@ fn main() -> eframe::Result {
             // Rescan at every start, so new plugins show up; in auto config GigEyes asks about them.
             let mut rig = rig::load();
             let mut asking = vec![];
-            if settings.onboarded
-                && let Some(old) = &rig
-            {
+            if let Some(old) = &rig {
                 let fresh = rig::rescan(old, &rig::default_folders());
-                if settings.new_plugins == research::NewPlugins::Auto {
+                // Not before the first-start setup: its plugins step shows them all anyway.
+                if settings.onboarded && settings.new_plugins == research::NewPlugins::Auto {
                     asking = fresh
                         .iter()
                         .filter(|p| !old.iter().any(|o| o.path == p.path))
@@ -172,6 +171,8 @@ struct App {
     looking_up: Option<(String, usize, usize)>,
     lookup_cancel: Arc<AtomicBool>,
     lookup_paused: bool,
+    /// Why lookups stopped by themselves (no internet, a bad key, the AI not starting).
+    lookup_note: Option<String>,
     lookup_failed: std::collections::HashMap<String, String>,
     /// New plugins found at start that GigEyes still has to ask about (auto config).
     asking: Vec<PathBuf>,
@@ -180,6 +181,9 @@ struct App {
     onboarding: Option<usize>,
     onboarding_at: f64,
     guitar: String,
+    /// The "In your rig" line of each finding on screen, with a fingerprint of what it was worked
+    /// out from, so it's only redone when the findings, the rig or the knowledge change.
+    yours: (u64, Vec<Option<String>>),
     /// Read once, the first time the AI is needed.
     hardware: Option<(hardware::Hardware, hardware::Choice)>,
     /// The local AI reading the research pages: the page it's on (0 while it loads), Stop, and any error.
@@ -200,6 +204,8 @@ enum Lookup {
     /// Now looking up this plugin, number i of n.
     Now(String, usize, usize),
     Done(String, Result<Vec<ai::Finding>, String>),
+    /// Something every lookup would fail on (the search key, the internet, the AI): pause.
+    Halt(String),
     Finished,
 }
 
@@ -533,7 +539,15 @@ impl App {
                     .weak(),
             );
         }
-        for f in findings {
+        let key = fingerprint(findings, &self.knowledge, self.rig.as_deref());
+        if self.yours.0 != key || self.yours.1.len() != findings.len() {
+            let lines = findings
+                .iter()
+                .map(|f| in_your_rig(&self.knowledge, &f.gear, &f.kind, self.rig.as_deref()))
+                .collect();
+            self.yours = (key, lines);
+        }
+        for (f, yours) in findings.iter().zip(&self.yours.1) {
             ui.add_space(12.0);
             ui.horizontal_wrapped(|ui| {
                 ui.label(semibold(&f.gear, 15.0));
@@ -548,8 +562,7 @@ impl App {
                     .italics()
                     .weak(),
             );
-            if let Some(yours) = in_your_rig(&self.knowledge, &f.gear, &f.kind, self.rig.as_deref())
-            {
+            if let Some(yours) = yours {
                 ui.label(RichText::new(yours).size(13.0).color(ink()));
             }
             let domain = f
@@ -763,6 +776,23 @@ impl App {
                                 |ui| ui.label(RichText::new(heading).size(12.0).weak()),
                             );
                         }
+                        let left = plugins.iter().filter(|p| p.owned && !p.lookup).count();
+                        if left > 0 {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let all = ui
+                                    .small_button(match left {
+                                        1 => "Look up the other one in use".to_string(),
+                                        n => format!("Look up the other {n} in use"),
+                                    })
+                                    .on_hover_text("One web search for each plugin.");
+                                if all.clicked() {
+                                    for plugin in plugins.iter_mut().filter(|p| p.owned) {
+                                        plugin.lookup = true;
+                                    }
+                                    changed = true;
+                                }
+                            });
+                        }
                     });
                     ui.add_space(4.0);
                     let mut shown = 0;
@@ -932,6 +962,7 @@ impl App {
             self.knowledge.plugins.retain(|k| k.plugin != plugin);
             self.lookup_failed.remove(&plugin);
             self.lookup_paused = false;
+            self.lookup_note = None;
             self.rig_error = self.knowledge.save().err();
         }
         changed
@@ -967,6 +998,10 @@ impl App {
                     Lookup::Done(name, Err(e)) => {
                         self.lookup_failed.insert(name, e);
                     }
+                    Lookup::Halt(e) => {
+                        self.lookup_paused = true;
+                        self.lookup_note = Some(e);
+                    }
                     Lookup::Finished => finished = true,
                 }
             }
@@ -1001,24 +1036,38 @@ impl App {
         );
         thread::spawn(move || {
             let n = todo.len();
-            for (i, (name, vendor)) in todo.into_iter().enumerate() {
-                if cancel.load(Ordering::Relaxed) {
-                    break;
-                }
-                let _ = tx.send(Lookup::Now(name.clone(), i + 1, n));
-                ctx.request_repaint();
-                let page = AtomicUsize::new(0);
-                // shortcut: the AI starts and quits for each plugin; keep it running across them if
-                // looking up many plugins at once gets slow.
-                let found = research::search_plugin(&key, &name, &vendor).and_then(|pages| {
-                    if pages.sources.iter().all(|s| s.text.trim().is_empty()) {
-                        Ok(vec![])
-                    } else {
-                        ai::read(&model, gpu, &pages, ai::Task::Plugin, &page, &cancel)
+            let _ = tx.send(Lookup::Now(todo[0].0.clone(), 1, n));
+            ctx.request_repaint();
+            // One session for the whole batch: the model loads once.
+            let ran = ai::session(&model, gpu, &cancel, |ai| {
+                for (i, (name, vendor)) in todo.iter().enumerate() {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
                     }
-                });
-                let _ = tx.send(Lookup::Done(name, found));
-                ctx.request_repaint();
+                    let _ = tx.send(Lookup::Now(name.clone(), i + 1, n));
+                    ctx.request_repaint();
+                    // A failed search would fail for every plugin (and cost a search each): stop.
+                    let pages = match research::search_plugin(&key, name, vendor) {
+                        Ok(pages) => pages,
+                        Err(e) => {
+                            let _ = tx.send(Lookup::Halt(e));
+                            break;
+                        }
+                    };
+                    let found = ai.read(&pages, ai::Task::Plugin, &AtomicUsize::new(0));
+                    // The AI not answering at all: end this batch; the next starts it afresh.
+                    let broken = found.is_err();
+                    let _ = tx.send(Lookup::Done(name.clone(), found));
+                    ctx.request_repaint();
+                    if broken {
+                        break;
+                    }
+                }
+            });
+            if let Err(e) = ran
+                && e != ai::STOPPED
+            {
+                let _ = tx.send(Lookup::Halt(e));
             }
             let _ = tx.send(Lookup::Finished);
             ctx.request_repaint();
@@ -1057,6 +1106,8 @@ impl App {
             .is_some_and(|m| model::is_downloaded(&m))
         {
             format!("{waiting} to be looked up. Download the local AI in Settings to start.")
+        } else if let Some(note) = &self.lookup_note {
+            format!("{note} {waiting} to be looked up.")
         } else if self.lookup_paused {
             format!("{waiting} to be looked up.")
         } else if self.ai_job.is_some() {
@@ -1069,6 +1120,7 @@ impl App {
                 ui.label(RichText::new(line).size(13.0));
                 if self.lookup_paused && ui.button("Look up now").clicked() {
                     self.lookup_paused = false;
+                    self.lookup_note = None;
                 }
             });
         });
@@ -1494,9 +1546,9 @@ impl App {
         card(ui, |ui| {
             ui.label(semibold("Remove all GigEyes files", 17.0));
             let what = if uninstaller.is_some() {
-                "Deletes your rig, saved research, search key, settings and the downloaded AI, then opens the uninstaller to remove the app itself."
+                "Deletes your rig, plugin lookups, saved research, search key, settings and the downloaded AI, then opens the uninstaller to remove the app itself."
             } else {
-                "Deletes your rig, saved research, search key, settings and the downloaded AI from this PC."
+                "Deletes your rig, plugin lookups, saved research, search key, settings and the downloaded AI from this PC."
             };
             ui.label(RichText::new(what).size(13.0).weak());
             ui.add_space(10.0);
@@ -1619,24 +1671,37 @@ impl App {
     /// Delete everything GigEyes saved, then hand over to the uninstaller for the app itself.
     fn remove_all(&mut self, ctx: &egui::Context, uninstaller: Option<&std::path::Path>) {
         self.confirm_remove = false;
-        // A running AI holds its files open, and Windows won't delete open files.
+        // A running AI or download holds its files open, and Windows won't delete open files:
+        // stop them all first.
         self.stop_reading();
+        self.lookup_cancel.store(true, Ordering::Relaxed);
+        (self.lookup_job, self.looking_up) = (None, None);
         self.get_ai_cancel.store(true, Ordering::Relaxed);
         // Only GigEyes' own folders: %APPDATA%\GigEyes and %LOCALAPPDATA%\GigEyes (the AI model).
         let folders = [
             research::data_dir(),
             model::dir().and_then(|d| d.parent().map(|p| p.to_path_buf())),
         ];
-        let failed: Vec<String> = folders
-            .into_iter()
-            .flatten()
-            .filter_map(|dir| match std::fs::remove_dir_all(&dir) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    Some(format!("{}: {e}", dir.display()))
-                }
-                _ => None,
-            })
-            .collect();
+        // They take a moment to let go of their files, so try for up to three seconds.
+        let mut failed: Vec<String> = vec![];
+        for attempt in 0..15 {
+            if attempt > 0 {
+                thread::sleep(std::time::Duration::from_millis(200));
+            }
+            failed = folders
+                .iter()
+                .flatten()
+                .filter_map(|dir| match std::fs::remove_dir_all(dir) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        Some(format!("{}: {e}", dir.display()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if failed.is_empty() {
+                break;
+            }
+        }
         if !failed.is_empty() {
             self.remove_note = Some(format!(
                 "Some files couldn't be removed. {}",
@@ -1645,11 +1710,13 @@ impl App {
             return;
         }
         // Forget what was read from those files.
-        self.lookup_cancel.store(true, Ordering::Relaxed);
         (self.rig, self.research, self.key_note) = (None, None, None);
         self.knowledge = knowledge::Knowledge::default();
+        self.lookup_failed.clear();
+        (self.lookup_paused, self.lookup_note) = (false, None);
         self.asking.clear();
         self.tavily_key.clear();
+        self.guitar.clear();
         self.remove_note = Some(match uninstaller {
             Some(path) => match update::run_as_admin(path, "--uninstall") {
                 Ok(()) => {
@@ -1710,6 +1777,29 @@ fn models_line(known: &knowledge::Known) -> String {
             many[2]
         ),
     }
+}
+
+/// A number that changes whenever the findings, what's known about the plugins, or the rig's ticks do.
+fn fingerprint(
+    findings: &[ai::Finding],
+    knowledge: &knowledge::Knowledge,
+    rig: Option<&[rig::Plugin]>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in findings {
+        (&f.gear, &f.kind).hash(&mut h);
+    }
+    for known in &knowledge.plugins {
+        known.plugin.hash(&mut h);
+        for m in &known.models {
+            (&m.gear, &m.kind, &m.model).hash(&mut h);
+        }
+    }
+    for plugin in rig.into_iter().flatten() {
+        (&plugin.name, plugin.owned).hash(&mut h);
+    }
+    h.finish()
 }
 
 /// "In your rig: Helix Native (Cali Rectifire), TSE808 and 1 more" when ticked plugins model this gear.
@@ -1813,6 +1903,7 @@ impl eframe::App for App {
         if let Some(path) =
             ctx.input(|i| i.raw.dropped_files.first().map(|f| f.path().to_path_buf()))
         {
+            self.screen = Screen::Tone; // the result shows there, whichever tab it was dropped on
             self.open(path, &ctx);
         }
         if let Some(rx) = &self.update_check

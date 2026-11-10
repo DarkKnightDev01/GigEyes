@@ -4,7 +4,17 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7: GigEyes learns your own plugins**
+**New in 0.7.1: fixes**
+- **The AI can't be left running.** Closing GigEyes, or updating it, while the AI was reading or looking plugins up used to leave the AI server running in the background, holding memory. Windows now ends it together with GigEyes.
+- **Plugin lookups are faster and more complete.** The AI now loads once for a whole batch of plugins, not once per plugin, and reads long pages (a suite's full model list) in parts, where it used to stop after the first 20,000 characters.
+- **Lookups pause on a problem.** With no internet, a rejected key or no searches left, lookups used to fail for every plugin, using a search each. Now they pause with one message and a **Look up now** button.
+- **Look up the other N in use:** one button ticks **Look up** for every plugin you use.
+- **Remove all GigEyes files** now stops lookups and downloads first and waits for them to let go of their files, so it no longer fails when the AI was busy.
+- Dropping a file on the **Your rig** or **Settings** tab now switches to **Tone**, where the result shows.
+- The gear list scrolls smoothly again with large plugins in your rig.
+- If you're updating from 0.6 or older, the first-start setup now shows plugins installed since your last scan.
+
+**In 0.7: GigEyes learns your own plugins**
 - **First-start setup.** GigEyes opens with five short steps: appearance, your guitar, your plugins, the search key and the local AI. Every step can be skipped, and **Settings → First-start setup → Run it again** goes through it again. If you're updating, it opens once now.
 - **Your rig has two columns:** **Use** (you play through it) and **Look up** (find out what real gear it models). Looking up searches the web with your Tavily key and the local AI reads the pages; what it finds stays on your PC, marked "found on the web", each model with the sentence it came from and a link. A wrong one can be removed, and any plugin can be looked up again. Lookups run in the background (one search per plugin) and **Stop** pauses them.
 - **New plugins.** GigEyes rescans at every start. In **Auto config** it asks about each new plugin: Yes ticks both columns and looks it up. In **Manual** new plugins appear unticked.
