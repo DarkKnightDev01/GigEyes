@@ -336,7 +336,7 @@ impl eframe::App for Setup {
                         let fraction = ctx.animate_value_with_time(
                             egui::Id::NULL.with("install-bar"),
                             (*done as f32 / *total as f32).clamp(0.05, 1.0),
-                            secs(0.3),
+                            0.3,
                         );
                         ui.add(
                             egui::ProgressBar::new(fraction)
@@ -355,7 +355,7 @@ impl eframe::App for Setup {
                             egui::ProgressBar::new(ctx.animate_value_with_time(
                                 egui::Id::NULL.with("ai-bar"),
                                 *done as f32 / self.ai_bytes.max(1) as f32,
-                                secs(0.3),
+                                0.3,
                             ))
                                 .fill(accent())
                                 .desired_height(8.0)

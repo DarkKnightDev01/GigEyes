@@ -4,7 +4,13 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.2.2: better plugin lookups**
+**New in 0.7.2.3: smoother, and easier to fix a lookup**
+- **Switching tabs slides.** The page glides in from the side of the tab you picked.
+- **Animations always play.** They used to switch off when Windows' "Animation effects" setting was off; now GigEyes animates the same on every PC, with nothing to change in Windows.
+- **Look it up again is always there** under a looked-up plugin, instead of hidden in "Where this comes from".
+- Sound collections ("Jimi Hendrix collection") no longer count as modelled gear.
+
+**In 0.7.2.2: better plugin lookups**
 - **Facts are about the sound.** The AI is told to leave out slogans and sales lines ("Your signal chain, your way") and only give facts the page's sentence states.
 - **Only real gear counts as modelled.** A maker on its own ("Orange", "Ampeg"), a bare word ("Portaflex") or software ("Neural Amp Modeler") is no longer listed as modelled gear. This also cleans up what earlier lookups found.
 - **The right product.** Lookups now search for the guitar plugin, so a plain name like "Gateway" doesn't pull in a synthesizer of the same name, and pages about another product are skipped.

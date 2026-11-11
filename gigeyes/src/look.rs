@@ -5,7 +5,6 @@ use eframe::egui::{
     Vec2,
 };
 use std::f32::consts::{FRAC_PI_2, TAU};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Amp black and tube amber, or warm paper for light mode: one accent on data and the main action.
@@ -59,7 +58,7 @@ pub fn error() -> Color32 {
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x14, 0x13, 0x11);
 pub const RADIUS: u8 = 8;
 /// The version people see. Four parts, Windows style; Cargo's own version only allows three.
-pub const VERSION: &str = "0.7.2.2";
+pub const VERSION: &str = "0.7.2.3";
 /// Barlow (SIL Open Font License, see fonts/OFL.txt), with egui's own fonts behind it for missing glyphs.
 pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
@@ -213,7 +212,7 @@ pub fn tick(ui: &mut egui::Ui, on: &mut bool, title: RichText, detail: Option<Ri
     let lit = ui.ctx().animate_bool_with_time(
         response.id,
         response.hovered() || response.has_focus(),
-        secs(0.12),
+        0.12,
     );
     if lit > 0.0 {
         ui.painter().set(
@@ -249,7 +248,7 @@ pub fn check(ui: &mut egui::Ui, on: &mut bool, name: &str) -> bool {
     let b = egui::Rect::from_center_size(cell.center(), Vec2::splat(22.0));
     let lit = ui
         .ctx()
-        .animate_bool_with_time(response.id, response.hovered(), secs(0.12));
+        .animate_bool_with_time(response.id, response.hovered(), 0.12);
     if lit > 0.0 {
         ui.painter().rect_filled(
             b.expand(3.0),
@@ -358,59 +357,36 @@ pub fn window_icon(cc: &eframe::CreationContext) {
     let _ = cc;
 }
 
-/// Windows' "Show animations in Windows" setting. Off means every animation jumps to its end.
-pub fn motion() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        #[cfg(windows)]
-        {
-            use windows::Win32::UI::WindowsAndMessaging::{
-                SPI_GETCLIENTAREAANIMATION, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-                SystemParametersInfoW,
-            };
-            let mut on: i32 = 1;
-            // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL (an i32) to the pointer we pass.
-            unsafe {
-                SystemParametersInfoW(
-                    SPI_GETCLIENTAREAANIMATION,
-                    0,
-                    Some(&mut on as *mut i32 as *mut _),
-                    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
-                )
-            }
-            .map_or(true, |()| on != 0)
-        }
-        #[cfg(not(windows))]
-        true
-    })
-}
-
-/// An animation length in seconds, or 0 when Windows animations are off.
-pub fn secs(seconds: f32) -> f32 {
-    if motion() { seconds } else { 0.0 }
-}
-
 /// Entrance for content that just appeared at `since` (egui time): fades in and settles up from 8 px
 /// below, 0.3 s ease-out. Only the drawing moves; clicks land where the content will be.
 pub fn enter<R>(ui: &mut egui::Ui, since: f64, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    let length = secs(0.3);
-    let t = if length > 0.0 {
-        ((ui.input(|i| i.time) - since) as f32 / length).clamp(0.0, 1.0)
-    } else {
-        1.0
-    };
+    enter_from(ui, since, Vec2::new(0.0, 8.0), add)
+}
+
+/// `enter`, coming in from `from` (pixels away from where the content ends up), over 0.35 s.
+pub fn enter_from<R>(
+    ui: &mut egui::Ui,
+    since: f64,
+    from: Vec2,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let t = ((ui.input(|i| i.time) - since) as f32 / 0.35).clamp(0.0, 1.0);
     if t < 1.0 {
         ui.ctx().request_repaint();
     }
-    settle(ui, egui::emath::easing::cubic_out(t), add)
+    shift(ui, egui::emath::easing::cubic_out(t), from, add)
 }
 
 /// Draw `add` at `t` of the way through an entrance (0..1, already eased): faded to `t` and lifted the
 /// rest of the way from 8 px below. Only the drawing moves; clicks land where the content will be.
 pub fn settle<R>(ui: &mut egui::Ui, t: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    shift(ui, t, Vec2::new(0.0, 8.0), add)
+}
+
+fn shift<R>(ui: &mut egui::Ui, t: f32, from: Vec2, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         ui.multiply_opacity(t);
-        let lift = egui::emath::TSTransform::from_translation(Vec2::new(0.0, 8.0 * (1.0 - t)));
+        let lift = egui::emath::TSTransform::from_translation(from * (1.0 - t));
         ui.with_visual_transform(lift, add).inner
     })
     .inner
@@ -421,7 +397,7 @@ pub fn settle<R>(ui: &mut egui::Ui, t: f32, add: impl FnOnce(&mut egui::Ui) -> R
 /// carries on from the current position and speed, so it never jumps. Returns the position now.
 pub fn spring(ctx: &egui::Context, id: egui::Id, target: f32, response: f32) -> f32 {
     let (mut x, mut v) = ctx.data_mut(|d| *d.get_temp_mut_or_insert_with(id, || (target, 0.0f32)));
-    if motion() {
+    {
         let omega = TAU / response;
         let dt = ctx.input(|i| i.stable_dt).min(1.0 / 20.0);
         // Small steps keep the integration stable at low frame rates.
@@ -431,7 +407,7 @@ pub fn spring(ctx: &egui::Context, id: egui::Id, target: f32, response: f32) -> 
             x += v * h;
         }
     }
-    if !motion() || ((x - target).abs() < 0.05 && v.abs() < 0.5) {
+    if (x - target).abs() < 0.05 && v.abs() < 0.5 {
         (x, v) = (target, 0.0);
     } else {
         ctx.request_repaint();

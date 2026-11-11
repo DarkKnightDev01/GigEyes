@@ -153,6 +153,8 @@ struct App {
     update_done: Arc<AtomicU64>,
     /// Which screen is showing and since when, for its entrance.
     shown: (Screen, bool),
+    /// Where the page slides in from: right of a tab further along, left of an earlier one.
+    slide: f32,
     shown_at: f64,
     /// The old background while light and dark mode crossfade.
     theme_fade: Option<(Color32, f64)>,
@@ -930,11 +932,10 @@ impl App {
                                                     }
                                                 });
                                             }
-                                            ui.add_space(6.0);
-                                            if ui.small_button("Look it up again").clicked() {
-                                                again = Some(plugin.name.clone());
-                                            }
                                         });
+                                        if ui.small_button("Look it up again").clicked() {
+                                            again = Some(plugin.name.clone());
+                                        }
                                     }
                                     Some(_) => {
                                         ui.horizontal_wrapped(|ui| {
@@ -1421,7 +1422,7 @@ impl App {
                 let shown = ctx.animate_value_with_time(
                     egui::Id::NULL.with("get-ai-bar"),
                     done as f32 / self.get_ai_total.max(1) as f32,
-                    secs(0.3),
+                    0.3,
                 );
                 ui.add(
                     egui::ProgressBar::new(shown)
@@ -1690,11 +1691,8 @@ impl App {
                 if self.update_job.is_some() {
                     let target =
                         self.update_done.load(Ordering::Relaxed) as f32 / found.bytes.max(1) as f32;
-                    let shown = ctx.animate_value_with_time(
-                        egui::Id::NULL.with("update-bar"),
-                        target,
-                        secs(0.3),
-                    );
+                    let shown =
+                        ctx.animate_value_with_time(egui::Id::NULL.with("update-bar"), target, 0.3);
                     ui.add_space(10.0);
                     ui.add(
                         egui::ProgressBar::new(shown)
@@ -2003,6 +2001,7 @@ impl eframe::App for App {
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let has_result = matches!(self.state, State::Done(..));
         if (self.screen, has_result) != self.shown {
+            self.slide = (self.screen as i32 - self.shown.0 as i32).signum() as f32 * 28.0;
             self.shown = (self.screen, has_result);
             self.shown_at = now;
         }
@@ -2044,7 +2043,13 @@ impl eframe::App for App {
                                 } else {
                                     self.new_plugin_banner(ui);
                                     let since = self.shown_at;
-                                    enter(ui, since, |ui| match self.screen {
+                                    // Tabs slide sideways; a result showing up rises into place.
+                                    let from = if self.slide == 0.0 {
+                                        Vec2::new(0.0, 8.0)
+                                    } else {
+                                        Vec2::new(self.slide, 0.0)
+                                    };
+                                    enter_from(ui, since, from, |ui| match self.screen {
                                         Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
                                         Screen::Rig => self.rig_view(ui),
                                         Screen::Settings => self.settings_view(ui, &ctx),
@@ -2072,13 +2077,13 @@ impl eframe::App for App {
             ctx.request_repaint();
         }
 
-        let drop = ctx.animate_bool_with_time(egui::Id::NULL.with("drop"), hovering, secs(0.15));
+        let drop = ctx.animate_bool_with_time(egui::Id::NULL.with("drop"), hovering, 0.15);
         if drop > 0.0 {
             drop_overlay(&ctx, drop);
         }
         // Light and dark mode crossfade instead of flashing: the old background fades off the new one.
         if let Some((old, since)) = self.theme_fade {
-            let length = secs(0.35);
+            let length = 0.35;
             let t = if length > 0.0 {
                 ((now - since) as f32 / length).min(1.0)
             } else {

@@ -237,9 +237,16 @@ fn kinds_fit(found: &str, model: &str) -> bool {
 /// ("Orange", "MESA/Boogie"), a bare word ("Portaflex") or software ("Neural Amp Modeler") don't.
 pub fn real_gear(gear: &str) -> bool {
     let lower = gear.to_lowercase();
-    if ["modeler", "plugin", "software", "capture"]
-        .iter()
-        .any(|w| lower.contains(w))
+    if [
+        "modeler",
+        "plugin",
+        "software",
+        "capture",
+        "collection",
+        "bundle",
+    ]
+    .iter()
+    .any(|w| lower.contains(w))
     {
         return false;
     }
