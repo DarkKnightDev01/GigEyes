@@ -670,19 +670,23 @@ impl App {
                 .fill(accent());
             if ui.add(scan).clicked() {
                 let previous = self.rig.clone().unwrap_or_default();
-                self.rig = Some(rig::rescan(&previous, &rig::default_folders()));
+                let fresh = rig::rescan(&previous, &rig::default_folders());
+                self.ask_about_new(&previous, &fresh);
+                self.rig = Some(fresh);
                 changed = true;
             }
             if ui.button("Add a folder…").clicked()
                 && let Some(folder) = rfd::FileDialog::new().pick_folder()
             {
-                let mut plugins = self.rig.clone().unwrap_or_default();
+                let previous = self.rig.clone().unwrap_or_default();
+                let mut plugins = previous.clone();
                 let new: Vec<_> = rig::scan(&[folder])
                     .into_iter()
                     .filter(|p| !plugins.iter().any(|o| o.path == p.path))
                     .collect();
                 plugins.extend(new);
                 plugins.sort_by_key(|p| p.name.to_lowercase());
+                self.ask_about_new(&previous, &plugins);
                 self.rig = Some(plugins);
                 changed = true;
             }
@@ -702,6 +706,18 @@ impl App {
         if let Some(e) = &self.rig_error {
             ui.add_space(10.0);
             ui.colored_label(error(), e);
+        }
+    }
+
+    /// Auto config: ask about plugins in `fresh` that weren't in `previous`, as at startup.
+    fn ask_about_new(&mut self, previous: &[rig::Plugin], fresh: &[rig::Plugin]) {
+        if self.new_plugins != research::NewPlugins::Auto {
+            return;
+        }
+        for p in fresh {
+            if !previous.iter().any(|o| o.path == p.path) && !self.asking.contains(&p.path) {
+                self.asking.push(p.path.clone());
+            }
         }
     }
 
@@ -998,7 +1014,13 @@ impl App {
                     && !self.lookup_failed.contains_key(&p.name)
             })
             .map(|p| (p.name.clone(), p.vendor.clone()))
-            .collect()
+            .fold(vec![], |mut todo: Vec<(String, String)>, p| {
+                // The same plugin in both VST3 folders: one lookup.
+                if !todo.iter().any(|(name, _)| *name == p.0) {
+                    todo.push(p);
+                }
+                todo
+            })
     }
 
     /// Take in what the lookup job found, and start one when plugins are waiting and the search key
@@ -1075,10 +1097,15 @@ impl App {
                     };
                     let found = ai.read(&pages, ai::Task::Plugin, &AtomicUsize::new(0));
                     // The AI not answering at all: end this batch; the next starts it afresh.
-                    let broken = found.is_err();
+                    let broken = found.as_ref().err().filter(|e| *e != ai::STOPPED).cloned();
                     let _ = tx.send(Lookup::Done(name.clone(), found));
                     ctx.request_repaint();
-                    if broken {
+                    if let Some(e) = broken {
+                        // Pause: the next plugin would cost a search and most likely fail the same way.
+                        let _ = tx.send(Lookup::Halt(e));
+                        break;
+                    }
+                    if cancel.load(Ordering::Relaxed) {
                         break;
                     }
                 }
@@ -1691,6 +1718,7 @@ impl App {
         // A running AI or download holds its files open, and Windows won't delete open files:
         // stop them all first.
         self.stop_reading();
+        self.research_job = None; // a search finishing later would save into the removed folder
         self.lookup_cancel.store(true, Ordering::Relaxed);
         (self.lookup_job, self.looking_up) = (None, None);
         self.get_ai_cancel.store(true, Ordering::Relaxed);
@@ -1774,7 +1802,7 @@ fn models_line(known: &knowledge::Known) -> String {
     let mut real: Vec<&str> = vec![];
     for model in known.gear() {
         let name = model.gear.split('(').next().unwrap_or_default().trim();
-        if !real.contains(&name) {
+        if !name.is_empty() && !real.contains(&name) {
             real.push(name);
         }
     }

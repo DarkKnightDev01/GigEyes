@@ -4,7 +4,13 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.2: lookups learn what a plugin is and does**
+**New in 0.7.2.1: fixes**
+- **A broken AI no longer burns your searches.** If the local AI fails while looking up plugins, the lookups now pause with the reason, instead of moving on to the next plugin and spending a web search on each one.
+- **Scan for plugins asks about new ones.** In auto config, plugins found with **Scan for plugins** or **Add a folder** now get the "Do you play through it?" question, as they already did at startup.
+- **One lookup per plugin.** A plugin installed in both VST3 folders was looked up twice.
+- **Remove all files removes them all.** A song search still running when you pressed it could put the research folder back.
+
+**In 0.7.2: lookups learn what a plugin is and does**
 - A plugin lookup now finds out **what kind of plugin it is** (amp sim, overdrive, compressor, reverb and so on) and **what it does and how it behaves**, as short facts like "Tightens the low end, pushes the mids". The real gear it models is still found too.
 - Every fact is backed by the sentence from the page it comes from. Facts whose sentence isn't really on the page are dropped. **Where this comes from** under each plugin shows the sentences and links, and a wrong one can be removed.
 - Plugins looked up with 0.7 or 0.7.1 are looked up again by themselves, one web search each.
