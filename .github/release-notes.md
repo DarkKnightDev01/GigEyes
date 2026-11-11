@@ -1,4 +1,4 @@
-Pre-alpha build. Expect rough edges.
+Beta. Most of it works; some rough edges are left.
 
 **Install:** download `GigEyes-Setup-….exe` below and run it. It's one file with everything in it, installs into Program Files (Windows asks for permission), and shows up in Installed apps so you can remove it from there.
 

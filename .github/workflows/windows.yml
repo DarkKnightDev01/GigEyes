@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       release:
-        description: "Publish a pre-release with this tag, e.g. v0.1.0-prealpha.1 (leave empty to just build)"
+        description: "Publish a release with this tag, e.g. v0.7.3 (leave empty to just build)"
         default: ""
 
 permissions:
@@ -118,8 +118,8 @@ jobs:
           path: |
             dist/GigEyes-Setup.exe
             target/release/gigeyes.exe
-      # Publish a pre-release: run this workflow by hand with a tag, or push to main with a
-      # commit message starting "release: v0.1.0-prealpha.1".
+      # Publish a beta release, marked latest so it shows on the repo's front page: run this
+      # workflow by hand with a tag, or push to main with a commit message starting "release: v0.7.3".
       - if: inputs.release != '' || (github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'release:'))
         run: |
           # The tag is the first word after "release:", so "release: v0.5.0 AI reading" tags v0.5.0.
@@ -127,7 +127,7 @@ jobs:
           $setup = "GigEyes-Setup-$tag.exe"
           Copy-Item dist/GigEyes-Setup.exe $setup
           gh release create $tag $setup `
-            --target $env:GITHUB_SHA --prerelease --title "GigEyes $tag (pre-alpha)" `
+            --target $env:GITHUB_SHA --latest --title "GigEyes $tag (beta)" `
             --notes-file .github/release-notes.md
         env:
           INPUT_TAG: ${{ inputs.release }}

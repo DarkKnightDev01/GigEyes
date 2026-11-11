@@ -6,7 +6,7 @@ Recreate a guitar tone from a studio album or a live recording, using the plugin
 
 GigEyes listens to the song, works out the tone, and tells you which of your plugins to use and where to set the knobs. It never takes over your host.
 
-Pre-alpha. What works today:
+Beta. What works today:
 
 - **Tone analysis:** drop in a song, an isolated guitar track or a video link. GigEyes sums the tone up in one line, shows where an amp's Gain, Bass, Middle, Treble and Presence knobs would sit, and draws the EQ curve.
 - **Your rig:** GigEyes finds the VST3 plugins on your PC (it reads their names from disk and never loads them) and you tick the ones you play through.
