@@ -44,11 +44,12 @@ impl Known {
         self.models.iter().filter(|m| m.kind == crate::ai::FACT)
     }
 
-    /// The real gear it models.
+    /// The real gear it models. Also hides what lookups before 0.7.2.2 let through: a maker
+    /// alone, a bare model word, software.
     pub fn gear(&self) -> impl Iterator<Item = &Finding> {
-        self.models
-            .iter()
-            .filter(|m| m.kind != crate::ai::TYPE && m.kind != crate::ai::FACT)
+        self.models.iter().filter(|m| {
+            m.kind != crate::ai::TYPE && m.kind != crate::ai::FACT && real_gear(&m.gear)
+        })
     }
 }
 
@@ -199,7 +200,7 @@ impl Knowledge {
             let Some(known) = self.about(&plugin.name) else {
                 continue;
             };
-            for model in &known.models {
+            for model in known.gear() {
                 if kinds_fit(kind, &model.kind)
                     && same_gear(&makers, gear, &model.gear)
                     && !found
@@ -229,6 +230,28 @@ fn kinds_fit(found: &str, model: &str) -> bool {
         "cabinet" => model == "cabinet",
         "pedal" | "effect" | "other" => model == "pedal" || model == "effect",
         _ => false, // guitars, pickups, strings and tuning aren't plugins
+    }
+}
+
+/// Whether `gear` names one real unit: "Ampeg SVT", "SH-101" or "JCM800" do; a maker alone
+/// ("Orange", "MESA/Boogie"), a bare word ("Portaflex") or software ("Neural Amp Modeler") don't.
+pub fn real_gear(gear: &str) -> bool {
+    let lower = gear.to_lowercase();
+    if ["modeler", "plugin", "software", "capture"]
+        .iter()
+        .any(|w| lower.contains(w))
+    {
+        return false;
+    }
+    let all = words(gear);
+    let model: Vec<&String> = all
+        .iter()
+        .filter(|w| !MAKERS.contains(&w.as_str()) && !GENERIC.contains(&w.as_str()))
+        .collect();
+    match (all.len(), model.as_slice()) {
+        (_, []) => false,
+        (1, [w]) => w.chars().any(|c| c.is_ascii_digit()),
+        _ => true,
     }
 }
 
@@ -395,6 +418,32 @@ mod tests {
             vec![model("Mesa/Boogie Mark IIC+", "amp", "Mark IIC+")],
         );
         k
+    }
+
+    #[test]
+    fn only_named_units_count_as_real_gear() {
+        for yes in [
+            "Ampeg SVT",
+            "SH-101",
+            "Marshall JCM800",
+            "Ibanez TS808 Tube Screamer",
+            "Eventide H949",
+            "JCM800",
+        ] {
+            assert!(real_gear(yes), "{yes}");
+        }
+        for no in [
+            "Ampeg",
+            "MESA/Boogie",
+            "Orange",
+            "SVT",
+            "Portaflex",
+            "Neural Amp Modeler",
+            "NeuralAmpModelerCore",
+            "Marshall amp",
+        ] {
+            assert!(!real_gear(no), "{no}");
+        }
     }
 
     #[test]

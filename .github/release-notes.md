@@ -4,7 +4,13 @@ Pre-alpha build. Expect rough edges.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.2.1: fixes**
+**New in 0.7.2.2: better plugin lookups**
+- **Facts are about the sound.** The AI is told to leave out slogans and sales lines ("Your signal chain, your way") and only give facts the page's sentence states.
+- **Only real gear counts as modelled.** A maker on its own ("Orange", "Ampeg"), a bare word ("Portaflex") or software ("Neural Amp Modeler") is no longer listed as modelled gear. This also cleans up what earlier lookups found.
+- **The right product.** Lookups now search for the guitar plugin, so a plain name like "Gateway" doesn't pull in a synthesizer of the same name, and pages about another product are skipped.
+- Facts from earlier lookups stay until you press **Look it up again** under a plugin.
+
+**In 0.7.2.1: fixes**
 - **A broken AI no longer burns your searches.** If the local AI fails while looking up plugins, the lookups now pause with the reason, instead of moving on to the next plugin and spending a web search on each one.
 - **Scan for plugins asks about new ones.** In auto config, plugins found with **Scan for plugins** or **Add a folder** now get the "Do you play through it?" question, as they already did at startup.
 - **One lookup per plugin.** A plugin installed in both VST3 folders was looked up twice.

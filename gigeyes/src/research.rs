@@ -114,7 +114,8 @@ pub fn search(key: &str, song: &str) -> Result<Research, String> {
 /// Pages on what a plugin is, does and models: its maker's page, manuals and reviews. `subject` in the result is the
 /// plugin's name.
 pub fn search_plugin(key: &str, name: &str, vendor: &str) -> Result<Research, String> {
-    let query = format!("\"{name}\" {vendor} plugin what it does sound features based on");
+    // "VST3 guitar" keeps a plain name like "Gateway" on the guitar plugin, not other products.
+    let query = format!("\"{name}\" {vendor} VST3 guitar plugin what it does sound based on");
     search_at(TAVILY, key, name, &query, 5, PLUGIN_TEXT_LIMIT)
 }
 

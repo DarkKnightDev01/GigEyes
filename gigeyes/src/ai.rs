@@ -52,9 +52,9 @@ Leave out gear the page doesn't tie to this song, album or tour, gear used only 
 const PLUGIN_PROMPT: &str = "You read one web page about an audio plugin. Report what the page says about this plugin.\n\
 - type: what kind of plugin it is, from the list; \"unknown\" if the page doesn't say\n\
 - type_quote: one sentence copied word for word from the page that shows its type, or an empty string\n\
-- facts: up to 8 short facts about what the plugin does and how it sounds and behaves, e.g. \"Tightens the low end before a high-gain amp\" or \"Cleans up when the guitar's volume is rolled back\". Each at most 12 words, in plain words, with quote: the sentence from the page it comes from, copied word for word.\n\
-- found: the real-world amps, cabinets, pedals and effects the page says this plugin models, emulates or is based on. gear: the real unit's make and model as the page writes them, not the plugin's own name for it; kind: amp, cabinet, pedal or effect; model: the plugin's own name for that model if the page gives one, otherwise an empty string; quote: one sentence copied word for word from the page that names the real unit.\n\
-Never reword, shorten or fix a quote. Leave out prices, system requirements, other products, and anything you aren't sure the page says about this plugin. If the page says nothing about it, return unknown and empty lists.";
+- facts: up to 8 short facts about how this plugin sounds, what it does to the signal and how it behaves, each at most 12 words, in plain words, with quote: the sentence from the page it comes from, copied word for word. Only facts that sentence states. No slogans or sales lines, nothing about the price, the company, presets or how easy it is to use.\n\
+- found: the real-world hardware amps, cabinets, pedals and effects the page says this plugin models, emulates or is based on. Not software, plugins or capture formats. gear: the real unit's full make and model as the page writes them, not the plugin's own name for it and never a maker name alone; kind: amp, cabinet, pedal or effect; model: the plugin's own name for that model if the page gives one, otherwise an empty string; quote: one sentence copied word for word from the page that names the real unit.\n\
+Never reword, shorten or fix a quote. Leave out prices, system requirements, other products, and anything you aren't sure the page says about this plugin. If the page is about a different product with the same name, or says nothing about this plugin, return unknown and empty lists.";
 
 /// The kinds of plugin the AI may name.
 const PLUGIN_TYPES: [&str; 20] = [
@@ -311,6 +311,9 @@ fn read_pages(
                 Ok(list) => {
                     for finding in list {
                         if let Some(f) = keep(finding, &text, &source.url)
+                            && (task == Task::Song
+                                || matches!(f.kind.as_str(), TYPE | FACT)
+                                || crate::knowledge::real_gear(&f.gear))
                             && !found.iter().any(|g| same(g, &f))
                         {
                             found.push(f);
