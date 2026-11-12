@@ -8,11 +8,13 @@ mod decode;
 mod fetch;
 mod hardware;
 mod intro;
+mod knobs;
 mod knowledge;
 mod look;
 mod model;
 mod research;
 mod rig;
+mod setting;
 mod update;
 
 use analysis::Tone;
@@ -39,6 +41,12 @@ const ICON_LINK: ImageSource = egui::include_image!("../icons/link.svg");
 const ICON_ALERT: ImageSource = egui::include_image!("../icons/alert.svg");
 
 fn main() -> eframe::Result {
+    let mut args = std::env::args_os().skip(1);
+    if args.next().is_some_and(|a| a == knobs::FLAG)
+        && let Some(plugin) = args.next()
+    {
+        knobs::child(std::path::Path::new(&plugin));
+    }
     let mut settings = research::load_settings();
     let seen = settings.intro_seen.clone();
     let intro_queued = settings.intro_now(VERSION);
@@ -136,6 +144,14 @@ struct App {
     chain_open_at: f64,
     chain_pick: std::collections::HashMap<String, String>,
     building: bool,
+    /// Learning the knobs of the chain's plugins: reading each plugin, then for a model inside a
+    /// suite, its manual on the web. The job, what it's on, whether it uses the local AI, Stop, and
+    /// what failed this session (by plugin, or plugin and model).
+    knob_job: Option<Receiver<KnobNews>>,
+    knob_doing: Option<String>,
+    knob_ai: bool,
+    knob_cancel: Arc<AtomicBool>,
+    knob_failed: std::collections::HashMap<String, String>,
     screen: Screen,
     /// None until the first scan: then the tone screen asks for it.
     rig: Option<Vec<rig::Plugin>>,
@@ -217,6 +233,18 @@ enum Lookup {
     /// Something every lookup would fail on (the search key, the internet, the AI): pause.
     Halt(String),
     Finished,
+}
+
+enum KnobNews {
+    Now(String),
+    Read(String, Result<Vec<knobs::Knob>, String>),
+    Model(String, String, Result<(Vec<String>, String), String>),
+    Finished,
+}
+
+/// What `knob_failed` keeps a failed model lookup under.
+fn model_key(plugin: &str, model: &str) -> String {
+    format!("{plugin}\u{1f}{model}")
 }
 
 const STEPS: usize = 5;
@@ -492,6 +520,63 @@ impl App {
     }
 
     /// Under the chain: the open block's gear, the plugin and model to use, and where it comes from.
+    /// The knobs of a block's plugin with what to set each to, or what GigEyes is doing to find
+    /// them, or why it can't.
+    fn knob_view(&mut self, block: &chain::Block, pick: Option<&chain::Pick>) -> Knobs {
+        let can = !self.tavily_key.trim().is_empty()
+            && self
+                .choice()
+                .model
+                .as_ref()
+                .is_some_and(model::is_downloaded);
+        let (Some(pick), State::Done(_, tone)) = (pick, &self.state) else {
+            return Knobs::None;
+        };
+        let doing = |fallback: String| Knobs::Wait(self.knob_doing.clone().unwrap_or(fallback));
+        let names = setting::names(block.stage, pick, &self.knowledge);
+        let from = match &names {
+            setting::Names::Read => {
+                return match self.knob_failed.get(&pick.plugin) {
+                    Some(e) => {
+                        Knobs::Missing(format!("Couldn't read the knobs of {}: {e}", pick.plugin))
+                    }
+                    None => doing(format!("Reading the knobs of {}…", pick.plugin)),
+                };
+            }
+            setting::Names::Web => {
+                let failed = self.knob_failed.get(&model_key(&pick.plugin, &pick.model));
+                return match failed {
+                    Some(e) => Knobs::Missing(format!(
+                        "Couldn't look up the knobs of the {} in {}: {e}",
+                        pick.model, pick.plugin
+                    )),
+                    None if !can => Knobs::Missing(format!(
+                        "{} doesn't show its knobs per model, so GigEyes looks the {} up in its manual. That needs the Tavily key and the local AI, both in Settings.",
+                        pick.plugin, pick.model
+                    )),
+                    None => doing(format!("Looking up the knobs of the {}…", pick.model)),
+                };
+            }
+            setting::Names::Plugin(k) if k.is_empty() => {
+                return Knobs::Missing(if pick.model.is_empty() {
+                    format!("{} shows GigEyes no knobs.", pick.plugin)
+                } else {
+                    format!(
+                        "Couldn't find which knobs the {} in {} has.",
+                        pick.model, pick.plugin
+                    )
+                });
+            }
+            setting::Names::Plugin(_) => format!("Knobs as {} names them.", pick.plugin),
+            setting::Names::Page(found) => {
+                format!("Knobs of the {} from {}.", pick.model, domain(&found.url))
+            }
+        };
+        let source = block.real.as_ref().map_or("", |r| r.settings.as_str());
+        let set = setting::dial(block.stage, &setting::list(&names), source, tone);
+        Knobs::List(set, from)
+    }
+
     fn block_details(&mut self, ui: &mut egui::Ui) {
         let Some(key) = self.chain_open.clone() else {
             return;
@@ -501,6 +586,7 @@ impl App {
             return;
         };
         let pick = chosen(&block, &self.chain_pick).cloned();
+        let knobs = self.knob_view(&block, pick.as_ref());
         let since = self.chain_open_at;
         // What the recording's starting settings were worked out from, on hover.
         let measured: Vec<String> = match &self.state {
@@ -577,7 +663,23 @@ impl App {
                             self.chain_pick.insert(key.clone(), current);
                         }
                     }
-                    if !block.settings.is_empty() {
+                    let listed = matches!(knobs, Knobs::List(..));
+                    match &knobs {
+                        Knobs::List(set, from) => settings_list(ui, &key, set, from),
+                        Knobs::Wait(what) => {
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                listening(ui);
+                                ui.label(RichText::new(what).size(13.0).weak());
+                            });
+                        }
+                        Knobs::Missing(why) => {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(why).size(13.0).weak());
+                        }
+                        Knobs::None => {}
+                    }
+                    if !listed && !block.settings.is_empty() {
                         ui.add_space(8.0);
                         ui.label(semibold("Settings", 13.0));
                         let settings =
@@ -762,6 +864,11 @@ impl App {
         if self.lookup_job.is_some() {
             self.ai_note = Some("The local AI is busy looking up your plugins. Stop that in Your rig, then build again.".into());
             return;
+        }
+        if self.knob_job.is_some() && self.knob_ai {
+            // The song comes first; the knob lookups start again once it's read.
+            self.knob_cancel.store(true, Ordering::Relaxed);
+            (self.knob_job, self.knob_doing) = (None, None);
         }
         self.start_reading(ctx);
     }
@@ -1299,6 +1406,145 @@ impl App {
             })
     }
 
+    /// Take in what the knob job found, and start one when a block's plugin still needs its knobs
+    /// read, or a model inside a suite its manual looked up (that one needs the local AI free).
+    fn run_knobs(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.knob_job {
+            let mut finished = false;
+            while let Ok(news) = rx.try_recv() {
+                match news {
+                    KnobNews::Now(what) => self.knob_doing = Some(what),
+                    KnobNews::Read(plugin, Ok(knobs)) => {
+                        self.knowledge.knobs.insert(plugin, knobs);
+                        self.rig_error = self.knowledge.save().err();
+                    }
+                    KnobNews::Read(plugin, Err(e)) => {
+                        self.knob_failed.insert(plugin, e);
+                    }
+                    KnobNews::Model(plugin, model, Ok((knobs, url))) => {
+                        self.knowledge.set_model_knobs(knowledge::ModelKnobs {
+                            plugin,
+                            model,
+                            knobs,
+                            url,
+                        });
+                        self.rig_error = self.knowledge.save().err();
+                    }
+                    KnobNews::Model(_, _, Err(e)) if e == ai::STOPPED => {}
+                    KnobNews::Model(plugin, model, Err(e)) => {
+                        self.knob_failed.insert(model_key(&plugin, &model), e);
+                    }
+                    KnobNews::Finished => finished = true,
+                }
+            }
+            if finished {
+                (self.knob_job, self.knob_doing) = (None, None);
+            }
+            return;
+        }
+        if !matches!(self.state, State::Done(..)) || self.onboarding.is_some() {
+            return;
+        }
+        let mut reads: Vec<(String, PathBuf)> = vec![];
+        let mut models: Vec<(String, String, String)> = vec![];
+        for block in &self.chain.1 {
+            let Some(pick) = chosen(block, &self.chain_pick) else {
+                continue;
+            };
+            match setting::names(block.stage, pick, &self.knowledge) {
+                setting::Names::Read if !self.knob_failed.contains_key(&pick.plugin) => {
+                    let path = self.rig.iter().flatten().find(|p| p.name == pick.plugin);
+                    if let Some(p) = path
+                        && !reads.iter().any(|(name, _)| *name == p.name)
+                    {
+                        reads.push((p.name.clone(), p.path.clone()));
+                    }
+                }
+                setting::Names::Web
+                    if !self
+                        .knob_failed
+                        .contains_key(&model_key(&pick.plugin, &pick.model)) =>
+                {
+                    let vendor = self
+                        .rig
+                        .iter()
+                        .flatten()
+                        .find(|p| p.name == pick.plugin)
+                        .map(|p| p.vendor.clone())
+                        .unwrap_or_default();
+                    let todo = (pick.plugin.clone(), vendor, pick.model.clone());
+                    if !models.contains(&todo) {
+                        models.push(todo);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (tx, rx) = mpsc::channel();
+        self.knob_cancel = Arc::new(AtomicBool::new(false));
+        let (cancel, ctx) = (self.knob_cancel.clone(), ctx.clone());
+        if !reads.is_empty() {
+            thread::spawn(move || {
+                // Plugins load one at a time: a heavy suite can take seconds.
+                for (name, path) in reads {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = tx.send(KnobNews::Now(format!("Reading the knobs of {name}…")));
+                    ctx.request_repaint();
+                    let _ = tx.send(KnobNews::Read(name, knobs::read(&path)));
+                }
+                let _ = tx.send(KnobNews::Finished);
+                ctx.request_repaint();
+            });
+            (self.knob_job, self.knob_ai) = (Some(rx), false);
+            return;
+        }
+        let choice = self.choice();
+        let Some(model) = choice.model.filter(model::is_downloaded) else {
+            return;
+        };
+        if models.is_empty()
+            || self.ai_job.is_some()
+            || self.lookup_job.is_some()
+            || self.tavily_key.trim().is_empty()
+        {
+            return;
+        }
+        let gpu = choice.backend != hardware::Backend::Cpu;
+        let key = self.tavily_key.clone();
+        thread::spawn(move || {
+            let ran = ai::session(&model, gpu, &cancel, |ai| {
+                for (plugin, vendor, name) in &models {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = tx.send(KnobNews::Now(format!(
+                        "Looking up the knobs of the {name} in {plugin}…"
+                    )));
+                    ctx.request_repaint();
+                    let found = research::search_knobs(&key, plugin, vendor, name)
+                        .and_then(|pages| ai.knobs(&pages, plugin, name));
+                    let _ = tx.send(KnobNews::Model(plugin.clone(), name.clone(), found));
+                    ctx.request_repaint();
+                }
+            });
+            if let Err(e) = ran {
+                // The AI didn't start: every model waiting fails the same way.
+                for (plugin, _, name) in &models {
+                    let _ = tx.send(KnobNews::Model(
+                        plugin.clone(),
+                        name.clone(),
+                        Err(e.clone()),
+                    ));
+                }
+            }
+            let _ = tx.send(KnobNews::Finished);
+            ctx.request_repaint();
+        });
+        (self.knob_job, self.knob_ai) = (Some(rx), true);
+    }
+
     /// Take in what the lookup job found, and start one when plugins are waiting and the search key
     /// and the local AI are there. Never while the AI reads a song's pages: one AI at a time.
     fn run_lookups(&mut self, ctx: &egui::Context) {
@@ -1330,6 +1576,7 @@ impl App {
         }
         if self.lookup_paused
             || self.ai_job.is_some()
+            || self.knob_job.is_some()
             || self.onboarding.is_some()
             || self.tavily_key.trim().is_empty()
         {
@@ -2280,6 +2527,7 @@ impl eframe::App for App {
         let mut home = egui::Rect::NOTHING;
 
         self.run_lookups(&ctx);
+        self.run_knobs(&ctx);
         let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
         let has_result = matches!(self.state, State::Done(..));
         if (self.screen, has_result) != self.shown {
@@ -2665,6 +2913,76 @@ fn chosen<'a>(
         .get(&block.key())
         .and_then(|name| block.picks.iter().find(|p| &p.plugin == name))
         .or(block.picks.first())
+}
+
+/// What a block's details show about its knobs.
+enum Knobs {
+    /// What to set each knob to, and where the knob names come from.
+    List(Vec<setting::Setting>, String),
+    Wait(String),
+    Missing(String),
+    None,
+}
+
+/// The knobs to turn, each with its value and where that comes from (more on hover), then the
+/// ones to leave alone.
+fn settings_list(ui: &mut egui::Ui, key: &str, set: &[setting::Setting], from: &str) {
+    use setting::From;
+    let change: Vec<&setting::Setting> = set.iter().filter(|s| s.from != From::Default).collect();
+    let leave: Vec<&setting::Setting> = set.iter().filter(|s| s.from == From::Default).collect();
+    ui.add_space(10.0);
+    ui.label(semibold("Settings", 13.0));
+    let summary = match (change.len(), leave.len()) {
+        (0, _) => {
+            "Nothing says where these go: start them at their defaults and go by ear.".to_string()
+        }
+        (n, 0) => format!("Set {n}."),
+        (n, m) => format!("Set {n}, leave the other {m} at default."),
+    };
+    ui.label(RichText::new(summary).size(13.0).color(ink()));
+    if !change.is_empty() {
+        ui.add_space(6.0);
+        egui::Grid::new(("set", key))
+            .num_columns(3)
+            .spacing(Vec2::new(18.0, 6.0))
+            .min_row_height(18.0)
+            .show(ui, |ui| {
+                for s in &change {
+                    ui.label(RichText::new(&s.knob).size(13.0).color(ink()));
+                    ui.label(semibold(&s.value, 13.0).color(accent()));
+                    let tag = match s.from {
+                        From::Source => "from a source",
+                        From::Recording => "from the recording",
+                        From::Default => "",
+                    };
+                    ui.label(RichText::new(tag).size(12.0).weak())
+                        .on_hover_text(&s.why);
+                    ui.end_row();
+                }
+            });
+    }
+    if !leave.is_empty() {
+        ui.add_space(6.0);
+        egui::CollapsingHeader::new(
+            RichText::new(format!("Leave at default ({})", leave.len())).size(13.0),
+        )
+        .id_salt(("leave", key))
+        .default_open(change.is_empty() || leave.len() <= 6)
+        .show(ui, |ui| {
+            egui::Grid::new(("leave-grid", key))
+                .num_columns(2)
+                .spacing(Vec2::new(18.0, 4.0))
+                .min_row_height(18.0)
+                .show(ui, |ui| {
+                    for s in &leave {
+                        ui.label(RichText::new(&s.knob).size(13.0).weak());
+                        ui.label(RichText::new(&s.value).size(13.0).weak());
+                        ui.end_row();
+                    }
+                });
+        });
+    }
+    ui.label(RichText::new(from).size(12.0).weak());
 }
 
 /// "Helix Native · Brit 2203 (stand-in)", for the swap menu.

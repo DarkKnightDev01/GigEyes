@@ -22,6 +22,8 @@ pub struct Tone {
     pub verdict: String,
     /// Gain, Bass, Middle, Treble, Presence: where an amp's knobs would sit, 0 to 10.
     pub knobs: Vec<Knob>,
+    /// Beats per minute, when the recording has a clear beat.
+    pub tempo_bpm: Option<f32>,
 }
 
 pub struct Knob {
@@ -36,6 +38,10 @@ pub struct Knob {
 
 /// Samples per loudness block for the peak-to-average measure.
 const BLOCK: usize = 2048;
+/// Samples per step of the attack envelope the tempo comes from: about 12 ms.
+const HOP: usize = 512;
+/// The tempo is read from the first four minutes or so: enough, and quick.
+const TEMPO_STEPS: usize = 20_000;
 
 /// Builds a Tone from audio fed in pieces, so a long concert never sits in memory whole.
 pub struct Analyzer {
@@ -54,6 +60,11 @@ pub struct Analyzer {
     block_len: usize,
     peak: f32,
     total: usize,
+    /// Energy of the sample-to-sample change per HOP: high at each pick attack and drum hit.
+    attacks: Vec<f32>,
+    attack_sum: f32,
+    attack_len: usize,
+    last: f32,
 }
 
 impl Analyzer {
@@ -75,6 +86,10 @@ impl Analyzer {
             block_len: 0,
             peak: 0.0,
             total: 0,
+            attacks: vec![],
+            attack_sum: 0.0,
+            attack_len: 0,
+            last: 0.0,
         }
     }
 
@@ -86,6 +101,16 @@ impl Analyzer {
             if self.block_len == BLOCK {
                 self.end_block();
             }
+            if self.attacks.len() < TEMPO_STEPS {
+                let change = s - self.last;
+                self.attack_sum += change * change;
+                self.attack_len += 1;
+                if self.attack_len == HOP {
+                    self.attacks.push(self.attack_sum);
+                    (self.attack_sum, self.attack_len) = (0.0, 0);
+                }
+            }
+            self.last = s;
         }
         self.total += samples.len();
         self.pending.extend_from_slice(samples);
@@ -105,7 +130,9 @@ impl Analyzer {
         let frames = self.frames as f32;
         self.power.iter_mut().for_each(|p| *p /= frames);
         let crest_db = crest(&self.loudness, self.peak);
-        describe(self.power, crest_db, self.total as f32 / rate as f32, rate)
+        let mut tone = describe(self.power, crest_db, self.total as f32 / rate as f32, rate);
+        tone.tempo_bpm = tempo(&self.attacks, rate);
+        tone
     }
 
     /// Hann-windowed FFT of the first FFT samples of `pending`, added to the running spectrum.
@@ -273,7 +300,69 @@ fn describe(power: Vec<f32>, crest_db: f32, seconds: f32, rate: u32) -> Tone {
         seconds,
         verdict,
         knobs: vec![gain, bass, middle, treble, presence],
+        tempo_bpm: None,
     }
+}
+
+/// The beat, from how often the attacks repeat: the strongest repeat between 70 and 180 BPM,
+/// leaning towards 120 so half or double the tempo loses a near tie. None without a clear beat.
+fn tempo(attacks: &[f32], rate: u32) -> Option<f32> {
+    let step = HOP as f32 / rate as f32;
+    if attacks.len() as f32 * step < 10.0 {
+        return None;
+    }
+    // Onsets: how much louder each step is than the one before.
+    // Squashed like loudness, but relative to the average, so hiss between notes stays near zero.
+    let typical = attacks.iter().sum::<f32>() / attacks.len() as f32 + 1e-12;
+    let level: Vec<f32> = attacks
+        .iter()
+        .map(|e| (1.0 + 10.0 * e / typical).ln())
+        .collect();
+    let rises: Vec<f32> = level.windows(2).map(|w| (w[1] - w[0]).max(0.0)).collect();
+    // Blurred over ±2 steps, so a beat that falls between steps still lines up with itself.
+    let mut onset: Vec<f32> = rises
+        .windows(5)
+        .map(|w| (w[0] + 2.0 * w[1] + 3.0 * w[2] + 2.0 * w[3] + w[4]) / 9.0)
+        .collect();
+    let mean = onset.iter().sum::<f32>() / onset.len() as f32;
+    onset.iter_mut().for_each(|o| *o -= mean);
+    let lag_of = |bpm: f32| 60.0 / (bpm * step);
+    let (short, long) = (lag_of(180.0).floor() as usize, lag_of(70.0).ceil() as usize);
+    // Up to twice the longest lag: a beat also repeats every two beats.
+    let at = |lag: usize| {
+        if lag >= onset.len() {
+            return 0.0;
+        }
+        let n = onset.len() - lag;
+        (0..n).map(|i| onset[i] * onset[i + lag]).sum::<f32>() / n as f32
+    };
+    let whole = at(0);
+    let repeat: Vec<f32> = (0..=2 * long + 2).map(at).collect();
+    let lean = |lag: usize| {
+        let octaves = (60.0 / (lag as f32 * step) / 120.0).log2();
+        (-0.5 * (octaves / 1.4).powi(2)).exp()
+    };
+    // A beat at this lag repeats at twice it too; a half-time lag lacks the beats in between.
+    let score = |lag: usize| (repeat[lag] + 0.5 * repeat[2 * lag]) * lean(lag);
+    let best = (short.max(1)..=long)
+        .filter(|&l| repeat[l] >= repeat[l - 1] && repeat[l] >= repeat[l + 1])
+        .max_by(|&a, &b| score(a).total_cmp(&score(b)))?;
+    // Every other beat repeats as well as every beat: take the faster when it's nearly as strong.
+    let half = best as f32 / 2.0;
+    let best = ((half - 1.0).floor() as usize..=(half + 1.0).ceil() as usize)
+        .filter(|&l| l >= short.max(1))
+        .max_by(|&a, &b| repeat[a].total_cmp(&repeat[b]))
+        .filter(|&h| repeat[h] >= 0.6 * repeat[best])
+        .unwrap_or(best);
+    // Noise repeats at no lag: the peak must hold a good share of the onsets' whole energy.
+    if whole <= 0.0 || repeat[best] < 0.15 * whole {
+        return None;
+    }
+    // Between steps: the top of a parabola through the peak and its neighbours.
+    let (a, b, c) = (repeat[best - 1], repeat[best], repeat[best + 1]);
+    let shift = 0.5 * (a - c) / (a - 2.0 * b + c).min(-1e-12);
+    let bpm = 60.0 / (best as f32 + shift) / step;
+    (70.0..=180.0).contains(&bpm).then_some(bpm)
 }
 
 /// "5 dB below" / "3 dB above" / "level with", for knob details.
@@ -398,6 +487,36 @@ mod tests {
             driven.verdict
         );
         assert!(driven.knobs.iter().all(|k| (0.0..=10.0).contains(&k.value)));
+    }
+
+    /// Muted strums on the beat over a little noise.
+    fn strums(bpm: f32, seconds: f32) -> Vec<f32> {
+        let n = (seconds * RATE as f32) as usize;
+        let beat = (60.0 / bpm * RATE as f32) as usize;
+        let hiss = noise(n);
+        (0..n)
+            .map(|i| {
+                let since = i % beat;
+                let strum = (-(since as f32) / (0.03 * RATE as f32)).exp() * hiss[(i * 7) % n];
+                0.8 * strum + 0.02 * hiss[i]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn finds_the_tempo_of_a_steady_beat() {
+        for bpm in [96.0, 120.0, 150.0] {
+            let found = analyze(&strums(bpm, 30.0), RATE)
+                .tempo_bpm
+                .expect("a clear beat");
+            assert!((found - bpm).abs() < 2.0, "{bpm} BPM read as {found}");
+        }
+    }
+
+    #[test]
+    fn no_tempo_without_a_beat() {
+        assert_eq!(analyze(&noise(RATE as usize * 20), RATE).tempo_bpm, None);
+        assert_eq!(analyze(&strums(120.0, 5.0), RATE).tempo_bpm, None);
     }
 
     #[test]

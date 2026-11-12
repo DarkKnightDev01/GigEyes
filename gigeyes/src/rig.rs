@@ -1,5 +1,6 @@
 //! Your rig: the VST3 plugins on this PC and which of them you play through.
-//! Plugins are never loaded; names, makers and types come from each bundle's moduleinfo.json.
+//! Scanning never loads a plugin; names, makers and types come from each bundle's moduleinfo.json.
+//! Knobs are read later, in a separate process (see knobs.rs).
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};

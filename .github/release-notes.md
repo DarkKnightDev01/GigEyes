@@ -4,7 +4,13 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.3.1: fixes to the chain**
+**New in 0.8: what to set on each plugin**
+- **Every block lists its knobs.** Click a block and it shows the knobs to turn, with the value for each, and folds the rest under "Leave at default". Each value says where it comes from: a source, the recording, or nothing (default).
+- **GigEyes reads your plugins' own knobs.** It opens each plugin in a separate background process and reads its knob names, ranges and defaults, so the list uses the plugin's own names and scale (e.g. "6 of 10" or "0.4 s"). The plugin isn't changed, and a plugin that hangs is left alone after 40 seconds.
+- **Suites look the model up.** Helix, AmpliTube and other multi-effect suites don't show their knobs per model, so GigEyes searches the model's manual and lets the local AI pick out its knobs (needs the Tavily key and the local AI).
+- **Values from the sources and the recording.** Settings the sources give ("gain at 6", "treble at 2 o'clock") go on the matching knobs. When nothing says, the amp's gain, bass, middle, treble and presence come from the recording, and delay time is set to a quarter note at the song's tempo, which GigEyes now detects.
+
+**In 0.7.3.1: fixes to the chain**
 - **Amp sims with effects fill effect slots.** AmpliTube, Helix, Guitar Rig and other amp sims whose lookup shows pedals or effects are now offered for chorus, delay, reverb and other effect blocks, instead of "Nothing in your rig".
 - **Capture loaders get the real unit.** For gear none of your plugins models, TONE3000, NAM and ToneX now come first with "Find a capture of" the named unit (say, an MXR M222 Talk Box), instead of an unrelated capture from the lookup.
 - A long file name no longer runs under the "listened" time.

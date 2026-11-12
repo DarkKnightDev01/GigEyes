@@ -213,7 +213,7 @@ fn start(model: &Model, gpu: bool) -> Result<Server, String> {
 /// Put the server in a Windows job that ends its processes when GigEyes exits, however it exits:
 /// closed mid-read, updated or crashed, the AI never stays behind holding memory.
 #[cfg(windows)]
-fn end_with_gigeyes(child: &Child) {
+pub(crate) fn end_with_gigeyes(child: &Child) {
     use std::os::windows::io::AsRawHandle;
     use std::sync::OnceLock;
     use windows::Win32::Foundation::HANDLE;
@@ -411,24 +411,15 @@ fn ask(
         }});
         schema["required"] = serde_json::json!(["type", "type_quote", "facts", "found"]);
     }
-    let body = serde_json::json!({
-        "messages": [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": format!("{label}: {subject}\nPage: {title}\n\n{text}")},
-        ],
-        "temperature": 0.2,
-        "max_tokens": tokens,
-        "response_format": {"type": "json_object", "schema": schema},
-        "chat_template_kwargs": {"enable_thinking": false},
-    });
-    let reply: serde_json::Value = agent
-        .post(format!("{base}/v1/chat/completions"))
-        .send_json(&body)
-        .and_then(|mut r| r.body_mut().read_json())
-        .map_err(|e| e.to_string())?;
-    let content = reply["choices"][0]["message"]["content"]
-        .as_str()
-        .ok_or("no answer")?;
+    let content = chat(
+        agent,
+        base,
+        prompt,
+        &format!("{label}: {subject}\nPage: {title}\n\n{text}"),
+        schema,
+        tokens,
+    )?;
+    let content = content.as_str();
     #[derive(Deserialize)]
     struct Fact {
         fact: String,
@@ -466,6 +457,156 @@ fn ask(
     );
     all.extend(answer.found);
     Ok(all)
+}
+
+/// One question to the model; the answer is JSON of `schema`'s shape.
+fn chat(
+    agent: &ureq::Agent,
+    base: &str,
+    system: &str,
+    user: &str,
+    schema: serde_json::Value,
+    tokens: usize,
+) -> Result<String, String> {
+    let body = serde_json::json!({
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.2,
+        "max_tokens": tokens,
+        "response_format": {"type": "json_object", "schema": schema},
+        "chat_template_kwargs": {"enable_thinking": false},
+    });
+    let reply: serde_json::Value = agent
+        .post(format!("{base}/v1/chat/completions"))
+        .send_json(&body)
+        .and_then(|mut r| r.body_mut().read_json())
+        .map_err(|e| e.to_string())?;
+    reply["choices"][0]["message"]["content"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "no answer".into())
+}
+
+const KNOBS_PROMPT: &str = "You read part of a web page about an audio plugin. List the controls of one model in it: the knobs, switches and sliders a player sets, named as the page names them.\n\
+- name: the control's name as the page writes it, e.g. \"Presence\"\n\
+- quote: the sentence or line copied word for word from the page that names this control of this model\n\
+Only this model's controls, not those of other models or of the plugin as a whole (no presets, tuner, input or output menus). If this part of the page doesn't list them, return an empty list.";
+
+/// The page around each mention of `name`, up to one part's worth: a manual is long and the
+/// model's controls are listed next to its name.
+fn around<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
+    const REACH: usize = 3000;
+    let (lower, name) = (text.to_ascii_lowercase(), name.to_ascii_lowercase());
+    if name.trim().is_empty() {
+        return vec![];
+    }
+    let edge = |mut at: usize| {
+        while !text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    };
+    let mut spans: Vec<(usize, usize)> = vec![];
+    for (at, _) in lower.match_indices(&name) {
+        let (start, end) = (
+            edge(at.saturating_sub(REACH / 3)),
+            edge((at + REACH).min(text.len())),
+        );
+        match spans.last_mut() {
+            Some(last) if start <= last.1 => last.1 = end,
+            _ => spans.push((start, end)),
+        }
+    }
+    let mut room = PART;
+    spans
+        .into_iter()
+        .map_while(|(start, end)| {
+            if room == 0 {
+                return None;
+            }
+            let end = edge(end.min(start + room));
+            room -= end - start;
+            Some(&text[start..end])
+        })
+        .collect()
+}
+
+impl Session<'_> {
+    /// The controls of `model` in `plugin`, from the first of `pages` that lists at least two,
+    /// with that page's address. Each name must be on the page in its quote.
+    pub fn knobs(
+        &self,
+        pages: &Research,
+        plugin: &str,
+        model: &str,
+    ) -> Result<(Vec<String>, String), String> {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(900)))
+            .build()
+            .into();
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {"knobs": {"type": "array", "maxItems": 30, "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "quote": {"type": "string"}},
+                "required": ["name", "quote"]
+            }}},
+            "required": ["knobs"]
+        });
+        #[derive(Deserialize)]
+        struct Control {
+            name: String,
+            quote: String,
+        }
+        #[derive(Deserialize)]
+        struct Answer {
+            knobs: Vec<Control>,
+        }
+        let (mut asked, mut failed) = (0, 0);
+        for source in &pages.sources {
+            let page = norm(&source.text);
+            let mut names: Vec<String> = vec![];
+            for part in around(&source.text, model) {
+                if self.cancel.load(Ordering::Relaxed) {
+                    return Err(STOPPED.into());
+                }
+                asked += 1;
+                let user = format!(
+                    "Plugin: {plugin}\nModel: {model}\nPage: {}\n\n{part}",
+                    source.title
+                );
+                let answer = chat(&agent, self.base, KNOBS_PROMPT, &user, schema.clone(), 800)
+                    .and_then(|a| serde_json::from_str::<Answer>(&a).map_err(|e| e.to_string()));
+                let Ok(answer) = answer else {
+                    failed += 1;
+                    continue;
+                };
+                for c in answer.knobs {
+                    let (name, quote) = (c.name.trim().to_string(), norm(&c.quote));
+                    if !name.is_empty()
+                        && name.chars().count() <= 30
+                        && quote.contains(&norm(&name))
+                        && page.contains(&quote)
+                        && !names.iter().any(|n| n.eq_ignore_ascii_case(&name))
+                    {
+                        names.push(name);
+                    }
+                }
+            }
+            if names.len() >= 2 {
+                return Ok((names, source.url.clone()));
+            }
+        }
+        if self.cancel.load(Ordering::Relaxed) {
+            return Err(STOPPED.into());
+        }
+        if failed > 0 && failed == asked {
+            return Err("The local AI couldn't read the pages.".into());
+        }
+        Ok((vec![], String::new()))
+    }
 }
 
 /// Lowercase, one space between words, and plain quote marks and dashes, so a quote still matches a
@@ -525,6 +666,20 @@ mod tests {
             url: String::new(),
             model: String::new(),
         }
+    }
+
+    #[test]
+    fn around_keeps_the_text_near_the_model() {
+        let text = format!(
+            "{}Brit 8000: Pre Amp, Bass, Middle.{}",
+            "x".repeat(5000),
+            "y".repeat(9000)
+        );
+        let near = around(&text, "brit 8000");
+        assert_eq!(near.len(), 1);
+        assert!(near[0].contains("Pre Amp, Bass"));
+        assert!(near[0].len() < 4500);
+        assert!(around(&text, "Missing").is_empty());
     }
 
     #[test]

@@ -119,6 +119,17 @@ pub fn search_plugin(key: &str, name: &str, vendor: &str) -> Result<Research, St
     search_at(TAVILY, key, name, &query, 5, PLUGIN_TEXT_LIMIT)
 }
 
+/// Pages listing the controls of `model` inside `plugin`: its manual, mostly.
+pub fn search_knobs(
+    key: &str,
+    plugin: &str,
+    vendor: &str,
+    model: &str,
+) -> Result<Research, String> {
+    let query = format!("\"{plugin}\" \"{model}\" {vendor} controls knobs manual");
+    search_at(TAVILY, key, plugin, &query, 3, PLUGIN_TEXT_LIMIT)
+}
+
 fn search_at(
     base: &str,
     key: &str,

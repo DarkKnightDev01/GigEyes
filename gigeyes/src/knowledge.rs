@@ -12,6 +12,23 @@ use std::path::PathBuf;
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
 pub struct Knowledge {
     pub plugins: Vec<Known>,
+    /// Each plugin's own knobs, read from the plugin (`knobs::read`), by plugin name.
+    #[serde(default)]
+    pub knobs: std::collections::BTreeMap<String, Vec<crate::knobs::Knob>>,
+    /// The knobs of one model inside a plugin (an amp in a suite), found on the web.
+    #[serde(default)]
+    pub model_knobs: Vec<ModelKnobs>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ModelKnobs {
+    pub plugin: String,
+    pub model: String,
+    /// Empty when the pages didn't list them: not searched again.
+    pub knobs: Vec<String>,
+    /// The page they're from.
+    #[serde(default)]
+    pub url: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -165,6 +182,19 @@ impl Knowledge {
             models,
             profile: true,
         });
+    }
+
+    /// The knobs of `model` in `plugin` from the web, if they were looked up.
+    pub fn model_knobs(&self, plugin: &str, model: &str) -> Option<&ModelKnobs> {
+        self.model_knobs
+            .iter()
+            .find(|m| m.plugin == plugin && m.model == model)
+    }
+
+    pub fn set_model_knobs(&mut self, found: ModelKnobs) {
+        self.model_knobs
+            .retain(|m| !(m.plugin == found.plugin && m.model == found.model));
+        self.model_knobs.push(found);
     }
 
     /// Take a model the lookup got wrong off `plugin`.

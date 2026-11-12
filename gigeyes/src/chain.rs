@@ -635,6 +635,7 @@ mod tests {
             seconds: 30.0,
             verdict: String::new(),
             knobs: vec![knob("Gain", 8.0), knob("Bass", 6.0)],
+            tempo_bpm: Some(120.0),
         }
     }
 
