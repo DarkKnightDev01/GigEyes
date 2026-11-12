@@ -3,6 +3,7 @@
 
 mod ai;
 mod analysis;
+mod chain;
 mod decode;
 mod fetch;
 mod hardware;
@@ -14,10 +15,10 @@ mod research;
 mod rig;
 mod update;
 
-use analysis::{Knob, Tone};
+use analysis::Tone;
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontFamily, FontId, ImageSource, Layout, Pos2,
-    RichText, Sense, Shape, Stroke, StrokeKind, Vec2,
+    RichText, Sense, Stroke, StrokeKind, Vec2,
 };
 use look::*;
 use std::path::PathBuf;
@@ -26,8 +27,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-/// How long the knobs take to turn to a new result.
-const REVEAL_SECS: f64 = 0.8;
 /// Past this, lines and knob rows get too wide to read; the column centres instead.
 const MAX_WIDTH: f32 = 760.0;
 
@@ -126,8 +125,17 @@ struct App {
     state: State,
     result: Option<Receiver<Outcome>>,
     link: String,
-    /// When the current result arrived, so the knobs can turn into place.
+    /// When the current result arrived.
     revealed_at: f64,
+    /// The chain for the current result, with a fingerprint of what it was built from; when it
+    /// was built (its blocks slide in), the block opened for details, and plugins swapped in by
+    /// block key. "Build the chain" carries on from the search to the reading while `building`.
+    chain: (u64, Vec<chain::Block>),
+    chain_at: f64,
+    chain_open: Option<String>,
+    chain_open_at: f64,
+    chain_pick: std::collections::HashMap<String, String>,
+    building: bool,
     screen: Screen,
     /// None until the first scan: then the tone screen asks for it.
     rig: Option<Vec<rig::Plugin>>,
@@ -284,7 +292,7 @@ impl App {
         );
     }
 
-    fn tone_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, hovering: bool, reveal: f32) {
+    fn tone_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, hovering: bool) {
         let busy = matches!(self.state, State::Reading(_));
         let has_result = matches!(self.state, State::Done(..));
         // Before the first result the drop zone leads; afterwards the result does and inputs shrink to a row.
@@ -312,7 +320,7 @@ impl App {
             card(ui, |ui| {
                 ui.label(semibold("Tell GigEyes what you play through", 17.0));
                 ui.label(
-                    RichText::new("Pick your plugins once, and GigEyes suggests settings for your own rig instead of a generic amp.")
+                    RichText::new("Pick your plugins once, and GigEyes builds each chain from your own plugins instead of generic gear.")
                         .size(13.0)
                         .weak(),
                 );
@@ -324,8 +332,11 @@ impl App {
         }
         ui.add_space(28.0);
 
+        if matches!(self.state, State::Done(..)) {
+            self.result_view(ui, ctx);
+            return;
+        }
         match &self.state {
-            State::Empty => amp_panel(ui, &waiting_knobs(), 1.0, false),
             State::Reading(label) => {
                 card(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -334,9 +345,10 @@ impl App {
                         ui.label(label);
                     });
                 });
-                // Same panel stays put, so the knobs turn in place when the result lands.
                 ui.add_space(14.0);
-                amp_panel(ui, &waiting_knobs(), 1.0, false);
+                card(ui, |ui| {
+                    empty_chain(ui, "Your chain shows up here once the recording is read.")
+                });
             }
             State::Failed(e) => card(ui, |ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -345,129 +357,299 @@ impl App {
                 });
                 ui.label(RichText::new("Try another file or link.").weak());
             }),
-            State::Done(name, tone) => report(ui, name, tone, ease(reveal)),
-        }
-        if matches!(self.state, State::Done(..)) {
-            ui.add_space(14.0);
-            self.research_view(ui, ctx);
+            _ => card(ui, |ui| {
+                empty_chain(
+                    ui,
+                    "Drop a recording in. GigEyes lays out which of your plugins to play it through, in order, and which model to pick in each.",
+                )
+            }),
         }
     }
 
-    fn research_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let searching = self.research_job.is_some();
-        card(ui, |ui| {
-            ui.label(semibold("Research this song", 17.0));
-            ui.label(
-                RichText::new("Find interviews, rig rundowns and gear lists for the song. Every source is linked so you can check it.")
-                    .size(13.0)
-                    .weak(),
-            );
-            ui.add_space(10.0);
-            if self.tavily_key.trim().is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(RichText::new("Research needs a free Tavily key.").weak());
-                    if ui.link("Add it in Settings").clicked() {
-                        self.screen = Screen::Settings;
-                    }
-                });
-                return;
-            }
-            ui.horizontal(|ui| {
-                let button_width = 120.0;
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.song)
-                        .hint_text("Artist - Song")
-                        .margin(Vec2::new(10.0, 7.0))
-                        .desired_width(
-                            ui.available_width() - button_width - ui.spacing().item_spacing.x,
-                        ),
-                );
-                let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let label = if self.research.is_some() {
-                    "Search again"
-                } else {
-                    "Find sources"
-                };
-                let go = ui.add_enabled(
-                    !searching,
-                    egui::Button::new(label).min_size(Vec2::new(button_width, 0.0)),
-                );
-                if (go.clicked() || enter) && !searching && !self.song.trim().is_empty() {
-                    let (tx, rx) = mpsc::channel();
-                    let (key, song, ctx) =
-                        (self.tavily_key.clone(), self.song.clone(), ctx.clone());
-                    thread::spawn(move || {
-                        let _ = tx.send(research::search(&key, &song));
-                        ctx.request_repaint();
-                    });
-                    self.research_job = Some(rx);
-                    self.research_note = None;
-                }
+    /// A result: what was heard, the chain to play it with, and the sources behind it.
+    fn result_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let State::Done(name, tone) = &self.state else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(name).weak());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let secs = tone.seconds.round() as u32;
+                ui.label(RichText::new(format!("{}:{:02} listened", secs / 60, secs % 60)).weak());
             });
-            if searching {
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    listening(ui);
-                    ui.label("Searching…");
-                });
-            }
-            if let Some(note) = &self.research_note {
-                ui.add_space(8.0);
-                ui.colored_label(error(), note);
-            }
-            if let Some(found) = &self.research {
-                ui.add_space(12.0);
-                let saved = if found.sources.is_empty() {
-                    "Nothing found for this song. Try the artist and song name spelled out in full."
-                        .to_string()
-                } else {
-                    format!(
-                        "{} sources for {}. Saved, so they open offline next time.",
-                        found.sources.len(),
-                        found.song
-                    )
-                };
-                ui.label(RichText::new(saved).size(13.0).weak());
-                for source in &found.sources {
-                    ui.add_space(10.0);
-                    let domain = source
-                        .url
-                        .split('/')
-                        .nth(2)
-                        .unwrap_or_default()
-                        .trim_start_matches("www.");
-                    ui.hyperlink_to(semibold(&source.title, 15.0).color(ink()), &source.url);
-                    ui.label(RichText::new(domain).size(12.0).weak());
-                    ui.label(RichText::new(snippet(&source.snippet)).size(13.0));
-                }
-            }
-            self.gear_view(ui, ctx);
+        });
+        ui.add_space(4.0);
+        ui.label(semibold(&tone.verdict, 26.0));
+        ui.add_space(20.0);
+        self.chain_view(ui, ctx);
+        if self.research.is_some() {
+            ui.add_space(14.0);
+            card(ui, |ui| {
+                self.sources_view(ui);
+                self.gear_view(ui);
+            });
+        }
+    }
+
+    /// Guitar, then the blocks, then the output, built from the research and the recording.
+    fn chain_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let State::Done(_, tone) = &self.state else {
+            return;
+        };
+        let findings = self
+            .research
+            .as_ref()
+            .and_then(|r| r.findings.as_deref())
+            .unwrap_or_default();
+        let key = fingerprint(findings, &self.knowledge, self.rig.as_deref())
+            ^ self.revealed_at.to_bits();
+        if self.chain.0 != key {
+            let rig = self.rig.as_deref().unwrap_or_default();
+            self.chain = (key, chain::build(findings, &self.knowledge, rig, tone));
+            self.chain_at = ui.input(|i| i.time);
+        }
+        let read = self.research.as_ref().is_some_and(|r| r.findings.is_some());
+        card(ui, |ui| {
+            ui.label(semibold("Your chain", 17.0));
+            let caption = if read {
+                "Built from the gear the sources name, matched to your ticked plugins. Click a block to see where it comes from or to swap the plugin."
+            } else {
+                "From the recording alone so far. Build the chain to add the gear the song was played with."
+            };
+            ui.label(RichText::new(caption).size(13.0).weak());
+            ui.add_space(16.0);
+            self.chain_row(ui);
+            self.block_details(ui);
+            ui.add_space(16.0);
+            self.build_controls(ui, ctx);
         });
     }
 
-    /// Under the sources: the local AI reads the pages and lists the gear, each with its quote.
-    fn gear_view(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let pages = match &self.research {
-            Some(r) => r
-                .sources
-                .iter()
-                .filter(|s| !s.text.trim().is_empty())
-                .count(),
-            None => 0,
-        };
-        if pages == 0 {
-            return;
+    fn chain_row(&mut self, ui: &mut egui::Ui) {
+        const WIRE: f32 = 26.0;
+        const END: f32 = 80.0;
+        // Wrap onto more rows instead of scrolling, so no block is ever out of sight. Every row
+        // but the last ends in a cable that carries on at the start of the next.
+        let width = ui.available_width();
+        let mut rows: Vec<Vec<usize>> = vec![vec![]];
+        let mut used = END;
+        for i in 0..self.chain.1.len() {
+            if used + WIRE + BLOCK.x + WIRE > width && !rows.last().unwrap().is_empty() {
+                rows.push(vec![]);
+                used = 0.0;
+            }
+            rows.last_mut().unwrap().push(i);
+            used += WIRE + BLOCK.x;
         }
-        let choice = self.choice();
-        ui.add_space(18.0);
-        ui.label(semibold("Gear on these pages", 17.0));
+        let output_wraps = used + WIRE + END > width;
+        let last = rows.len() - usize::from(!output_wraps);
+        let mut clicked = None;
+        for (r, row) in rows.iter().enumerate() {
+            if r > 0 {
+                ui.add_space(10.0);
+            }
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                if r == 0 {
+                    end_node(ui, "Guitar");
+                }
+                for &i in row {
+                    let block = &self.chain.1[i];
+                    wire(ui, true);
+                    let key = block.key();
+                    let pick = chosen(block, &self.chain_pick);
+                    let open = self.chain_open.as_deref() == Some(key.as_str());
+                    // One after another, left to right, like a signal going through.
+                    let since = self.chain_at + 0.06 * (i + 1) as f64;
+                    if enter(ui, since, |ui| block_card(ui, block, pick, open)).clicked() {
+                        clicked = Some(key);
+                    }
+                }
+                wire(ui, true);
+                if r == last {
+                    end_node(ui, "Output");
+                }
+            });
+        }
+        if output_wraps {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                wire(ui, true);
+                end_node(ui, "Output");
+            });
+        }
+        if let Some(key) = clicked {
+            let same = self.chain_open.as_ref() == Some(&key);
+            self.chain_open = (!same).then_some(key);
+            self.chain_open_at = ui.input(|i| i.time);
+        }
+    }
+
+    /// Under the chain: the open block's gear, the plugin and model to use, and where it comes from.
+    fn block_details(&mut self, ui: &mut egui::Ui) {
+        let Some(key) = self.chain_open.clone() else {
+            return;
+        };
+        let Some(block) = self.chain.1.iter().find(|b| b.key() == key).cloned() else {
+            self.chain_open = None;
+            return;
+        };
+        let pick = chosen(&block, &self.chain_pick).cloned();
+        let since = self.chain_open_at;
+        // What the recording's starting settings were worked out from, on hover.
+        let measured: Vec<String> = match &self.state {
+            State::Done(_, tone) => tone
+                .knobs
+                .iter()
+                .map(|k| format!("{} {:.0}: {}", k.label, k.value, k.detail))
+                .collect(),
+            _ => vec![],
+        };
+        ui.add_space(14.0);
+        enter(ui, since, |ui| {
+            egui::Frame::new()
+                .fill(well())
+                .corner_radius(CornerRadius::same(RADIUS))
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let title = match &block.real {
+                        Some(real) => format!("{}: {}", block.stage.label(), real.gear),
+                        None => block.stage.label().to_string(),
+                    };
+                    ui.label(semibold(title, 16.0));
+                    ui.add_space(4.0);
+                    let model = |p: &chain::Pick| {
+                        if p.model.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" and pick {}", p.model)
+                        }
+                    };
+                    let what = match (&pick, &block.real) {
+                        (Some(p), Some(real)) if p.exact => {
+                            format!("{} models the {}. Load it{}.", p.plugin, real.gear, model(p))
+                        }
+                        (Some(p), Some(real)) => format!(
+                            "None of your plugins models the {}. The closest you have: load {}{}.",
+                            real.gear,
+                            p.plugin,
+                            model(p)
+                        ),
+                        (Some(p), None) => format!("{} Load {}{}.", block.note, p.plugin, model(p)),
+                        (None, _) => format!(
+                            "{}None of your ticked plugins can do this. Tick one in Your rig, or look your plugins up so GigEyes knows what each one does.",
+                            if block.note.is_empty() { String::new() } else { format!("{} ", block.note) }
+                        ),
+                    };
+                    ui.label(RichText::new(what).size(14.0).color(ink()));
+                    if block.picks.len() > 1
+                        && let Some(p) = &pick
+                    {
+                        ui.add_space(8.0);
+                        let mut current = p.plugin.clone();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Use instead").size(13.0).weak());
+                            egui::ComboBox::from_id_salt(("swap", &key))
+                                .selected_text(pick_label(p))
+                                .width(260.0)
+                                .show_ui(ui, |ui| {
+                                    for other in &block.picks {
+                                        ui.selectable_value(
+                                            &mut current,
+                                            other.plugin.clone(),
+                                            pick_label(other),
+                                        );
+                                    }
+                                });
+                        });
+                        if current != p.plugin {
+                            self.chain_pick.insert(key.clone(), current);
+                        }
+                    }
+                    if !block.settings.is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(semibold("Settings", 13.0));
+                        let settings =
+                            ui.label(RichText::new(&block.settings).size(13.0).color(ink()));
+                        if block.real.as_ref().is_none_or(|r| r.settings.is_empty()) {
+                            settings.on_hover_text(measured.join("\n"));
+                        }
+                    }
+                    if !block.also.is_empty() {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("The sources also name: {}", block.also.join(", ")))
+                                .size(13.0)
+                                .weak(),
+                        );
+                    }
+                    if let Some(real) = &block.real {
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("\u{201C}{}\u{201D}", real.quote))
+                                .size(13.0)
+                                .italics()
+                                .weak(),
+                        );
+                        ui.hyperlink_to(
+                            RichText::new(domain(&real.url))
+                                .size(12.0)
+                                .color(ui.visuals().hyperlink_color),
+                            &real.url,
+                        );
+                    }
+                });
+        });
+    }
+
+    /// The song field and "Build the chain", with what it's doing and what it still needs.
+    fn build_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let busy = self.research_job.is_some() || self.ai_job.is_some();
+        let built = self
+            .research
+            .as_ref()
+            .is_some_and(|r| r.findings.is_some() && r.song == self.song.trim());
+        ui.horizontal(|ui| {
+            let button_width = 150.0;
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.song)
+                    .hint_text("Artist - Song")
+                    .margin(Vec2::new(10.0, 7.0))
+                    .desired_width(
+                        ui.available_width() - button_width - ui.spacing().item_spacing.x,
+                    ),
+            );
+            let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let label = if built {
+                "Build again"
+            } else {
+                "Build the chain"
+            };
+            let button = egui::Button::new(semibold(label, 14.0).color(ON_ACCENT))
+                .fill(accent())
+                .min_size(Vec2::new(button_width, 0.0));
+            let go = ui.add_enabled(!busy, button);
+            if (go.clicked() || enter) && !busy {
+                self.build_chain(ctx, built);
+            }
+        });
+        if self.research_job.is_some() {
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                listening(ui);
+                ui.label("Searching the web for the gear on this song…");
+            });
+        }
         if self.ai_job.is_some() {
+            let pages = self.pages();
             let page = self.ai_page.load(Ordering::Relaxed);
-            let doing = match (page, &choice.model) {
+            let doing = match (page, &self.choice().model) {
                 (0, Some(m)) => format!("Starting {}…", m.name),
                 _ => format!("Reading page {page} of {pages}…"),
             };
-            ui.add_space(8.0);
+            ui.add_space(10.0);
             ui.horizontal(|ui| {
                 listening(ui);
                 ui.label(doing);
@@ -477,70 +659,147 @@ impl App {
                     }
                 });
             });
-        } else {
-            let read = self.research.as_ref().is_some_and(|r| r.findings.is_some());
-            match &choice.model {
-                None => {
-                    ui.label(
-                        RichText::new("This PC can't spare the memory for the local AI, so the pages stay unread. The links above still work.")
-                            .size(13.0)
-                            .weak(),
-                    );
-                }
-                Some(model) if !model::is_downloaded(model) => {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(
-                            RichText::new("The local AI can read these pages and list the gear, with the sentence each piece comes from.")
-                                .size(13.0)
-                                .weak(),
-                        );
-                        if ui.link("Download it in Settings").clicked() {
-                            self.screen = Screen::Settings;
-                        }
-                    });
-                }
-                Some(model) => {
-                    if !read {
-                        ui.label(
-                            RichText::new(format!(
-                                "{} reads the pages on this PC and lists the gear and settings they name, each with the sentence it came from. Nothing is sent anywhere.",
-                                model.name
-                            ))
-                            .size(13.0)
-                            .weak(),
-                        );
-                    }
-                    ui.add_space(8.0);
-                    let label = if read { "Read again" } else { "Read the pages" };
-                    let free = self.lookup_job.is_none();
-                    if ui.add_enabled(free, egui::Button::new(label)).clicked() {
-                        self.start_reading(ctx);
-                    }
-                    if !free {
-                        ui.label(
-                            RichText::new("The local AI is busy looking up your plugins. Stop that in Your rig to read now.")
-                                .size(13.0)
-                                .weak(),
-                        );
-                    }
-                }
-            }
         }
-        if let Some(note) = &self.ai_note {
+        for note in [&self.research_note, &self.ai_note].into_iter().flatten() {
             ui.add_space(8.0);
             ui.colored_label(error(), note);
         }
+        if busy {
+            return;
+        }
+        let choice = self.choice();
+        let found = self
+            .research
+            .as_ref()
+            .and_then(|r| r.findings.as_ref())
+            .map(|f| f.len());
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            let hint = |ui: &mut egui::Ui, text: &str| {
+                ui.label(RichText::new(text).size(13.0).weak());
+            };
+            if self.tavily_key.trim().is_empty() {
+                hint(ui, "Finding the gear used on the song needs a free Tavily key.");
+                if ui.link("Add it in Settings").clicked() {
+                    self.screen = Screen::Settings;
+                }
+            } else if found == Some(0) {
+                hint(ui, "The sources name no gear for this song, so the chain comes from the recording.");
+            } else if found.is_some() {
+            } else if choice.model.is_none() {
+                hint(ui, "This PC can't spare the memory for the local AI that reads the pages, so the chain comes from the recording.");
+            } else if choice.model.as_ref().is_some_and(|m| !model::is_downloaded(m)) {
+                hint(ui, "The local AI reads the pages on this PC to find the gear.");
+                if ui.link("Download it in Settings").clicked() {
+                    self.screen = Screen::Settings;
+                }
+            } else {
+                hint(ui, "Searches the web once, then the local AI reads the pages on this PC. Nothing else is sent anywhere.");
+            }
+        });
+    }
+
+    /// "Build the chain": search the web for the song unless it's saved, then read the pages.
+    fn build_chain(&mut self, ctx: &egui::Context, again: bool) {
+        let song = self.song.trim().to_string();
+        if song.is_empty() {
+            return;
+        }
+        self.research_note = None;
+        self.ai_note = None;
+        if !again
+            && self.research.as_ref().is_none_or(|r| r.song != song)
+            && let Some(saved) = research::cached(&song)
+        {
+            self.stop_reading();
+            self.research = Some(saved);
+        }
+        let saved = self.research.as_ref().is_some_and(|r| r.song == song);
+        if again || !saved {
+            if self.tavily_key.trim().is_empty() {
+                self.research_note =
+                    Some("Searching needs a free Tavily key. Add it in Settings.".into());
+                return;
+            }
+            let (tx, rx) = mpsc::channel();
+            let (key, ctx) = (self.tavily_key.clone(), ctx.clone());
+            thread::spawn(move || {
+                let _ = tx.send(research::search(&key, &song));
+                ctx.request_repaint();
+            });
+            self.research_job = Some(rx);
+            self.building = true;
+            return;
+        }
+        if self.research.as_ref().is_some_and(|r| r.findings.is_none()) {
+            self.read_for_chain(ctx);
+        }
+    }
+
+    /// The second half of "Build the chain": the local AI reads the pages, if it can.
+    fn read_for_chain(&mut self, ctx: &egui::Context) {
+        if self.pages() == 0 {
+            self.ai_note = Some("None of the pages found could be read. Try the artist and song spelled out in full.".into());
+            return;
+        }
+        if !self
+            .choice()
+            .model
+            .as_ref()
+            .is_some_and(model::is_downloaded)
+        {
+            return; // the hint under the button says what's missing
+        }
+        if self.lookup_job.is_some() {
+            self.ai_note = Some("The local AI is busy looking up your plugins. Stop that in Your rig, then build again.".into());
+            return;
+        }
+        self.start_reading(ctx);
+    }
+
+    /// How many of the found pages have text to read.
+    fn pages(&self) -> usize {
+        self.research.as_ref().map_or(0, |r| {
+            r.sources
+                .iter()
+                .filter(|s| !s.text.trim().is_empty())
+                .count()
+        })
+    }
+
+    /// The pages the chain was built from, collapsed: each block already shows its own quote.
+    fn sources_view(&mut self, ui: &mut egui::Ui) {
+        let Some(found) = &self.research else {
+            return;
+        };
+        let title = semibold(format!("Sources ({})", found.sources.len()), 15.0);
+        egui::CollapsingHeader::new(title)
+            .id_salt("sources")
+            .show(ui, |ui| {
+                let saved = if found.sources.is_empty() {
+                    "Nothing found for this song. Try the artist and song name spelled out in full."
+                        .to_string()
+                } else {
+                    format!(
+                        "Found for {}. Saved, so they open offline next time.",
+                        found.song
+                    )
+                };
+                ui.label(RichText::new(saved).size(13.0).weak());
+                for source in &found.sources {
+                    ui.add_space(10.0);
+                    ui.hyperlink_to(semibold(&source.title, 15.0).color(ink()), &source.url);
+                    ui.label(RichText::new(domain(&source.url)).size(12.0).weak());
+                    ui.label(RichText::new(snippet(&source.snippet)).size(13.0));
+                }
+            });
+    }
+
+    /// Every piece of gear the local AI found on the pages, each with its quote, collapsed.
+    fn gear_view(&mut self, ui: &mut egui::Ui) {
         let Some(findings) = self.research.as_ref().and_then(|r| r.findings.as_ref()) else {
             return;
         };
-        if findings.is_empty() {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new("The AI found no gear these pages tie to the song.")
-                    .size(13.0)
-                    .weak(),
-            );
-        }
         let key = fingerprint(findings, &self.knowledge, self.rig.as_deref());
         if self.yours.0 != key || self.yours.1.len() != findings.len() {
             let lines = findings
@@ -549,37 +808,44 @@ impl App {
                 .collect();
             self.yours = (key, lines);
         }
-        for (f, yours) in findings.iter().zip(&self.yours.1) {
-            ui.add_space(12.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.label(semibold(&f.gear, 15.0));
-                ui.label(RichText::new(&f.kind).size(12.0).weak());
+        ui.add_space(6.0);
+        let title = semibold(format!("Gear they name ({})", findings.len()), 15.0);
+        egui::CollapsingHeader::new(title)
+            .id_salt("gear")
+            .show(ui, |ui| {
+                if findings.is_empty() {
+                    ui.label(
+                        RichText::new("The AI found no gear these pages tie to the song.")
+                            .size(13.0)
+                            .weak(),
+                    );
+                }
+                for (f, yours) in findings.iter().zip(&self.yours.1) {
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(semibold(&f.gear, 15.0));
+                        ui.label(RichText::new(&f.kind).size(12.0).weak());
+                    });
+                    if !f.settings.is_empty() {
+                        ui.label(RichText::new(&f.settings).size(13.0).color(ink()));
+                    }
+                    ui.label(
+                        RichText::new(format!("\u{201C}{}\u{201D}", f.quote))
+                            .size(13.0)
+                            .italics()
+                            .weak(),
+                    );
+                    if let Some(yours) = yours {
+                        ui.label(RichText::new(yours).size(13.0).color(ink()));
+                    }
+                    ui.hyperlink_to(
+                        RichText::new(domain(&f.url))
+                            .size(12.0)
+                            .color(ui.visuals().hyperlink_color),
+                        &f.url,
+                    );
+                }
             });
-            if !f.settings.is_empty() {
-                ui.label(RichText::new(&f.settings).size(13.0).color(ink()));
-            }
-            ui.label(
-                RichText::new(format!("\u{201C}{}\u{201D}", f.quote))
-                    .size(13.0)
-                    .italics()
-                    .weak(),
-            );
-            if let Some(yours) = yours {
-                ui.label(RichText::new(yours).size(13.0).color(ink()));
-            }
-            let domain = f
-                .url
-                .split('/')
-                .nth(2)
-                .unwrap_or_default()
-                .trim_start_matches("www.");
-            ui.hyperlink_to(
-                RichText::new(domain)
-                    .size(12.0)
-                    .color(ui.visuals().hyperlink_color),
-                &f.url,
-            );
-        }
     }
 
     /// The local AI this PC can run, worked out once.
@@ -1904,6 +2170,9 @@ impl eframe::App for App {
                     self.research_job = None; // a search still running was for the previous song
                     self.research_note = None;
                     self.stop_reading();
+                    self.building = false;
+                    self.chain_open = None;
+                    self.chain_pick.clear();
                     State::Done(name, tone)
                 }
                 Err(e) => State::Failed(e),
@@ -1919,9 +2188,13 @@ impl eframe::App for App {
                     self.research_note = research::save(&found).err();
                     self.research = Some(found);
                     self.stop_reading(); // it was reading the sources just replaced
+                    if self.building {
+                        self.read_for_chain(&ctx);
+                    }
                 }
                 Err(e) => self.research_note = Some(e),
             }
+            self.building = false;
             self.research_job = None;
         }
         if let Some(rx) = &self.ai_job
@@ -2005,10 +2278,6 @@ impl eframe::App for App {
             self.shown = (self.screen, has_result);
             self.shown_at = now;
         }
-        let reveal = ((now - self.revealed_at) / REVEAL_SECS).clamp(0.0, 1.0) as f32;
-        if has_result && reveal < 1.0 {
-            ctx.request_repaint();
-        }
 
         let margin = egui::Margin {
             top: 28,
@@ -2050,7 +2319,7 @@ impl eframe::App for App {
                                         Vec2::new(self.slide, 0.0)
                                     };
                                     enter_from(ui, since, from, |ui| match self.screen {
-                                        Screen::Tone => self.tone_view(ui, &ctx, hovering, reveal),
+                                        Screen::Tone => self.tone_view(ui, &ctx, hovering),
                                         Screen::Rig => self.rig_view(ui),
                                         Screen::Settings => self.settings_view(ui, &ctx),
                                     });
@@ -2115,11 +2384,6 @@ fn column(ui: &mut egui::Ui, side: f32, width: f32, add: impl FnOnce(&mut egui::
     });
 }
 
-/// Fast start, gentle stop, no overshoot.
-fn ease(t: f32) -> f32 {
-    egui::emath::easing::cubic_out(t)
-}
-
 fn icon(source: ImageSource<'static>, size: f32, tint: Color32) -> egui::Image<'static> {
     egui::Image::new(source)
         .fit_to_exact_size(Vec2::splat(size))
@@ -2137,7 +2401,7 @@ fn header(ui: &mut egui::Ui, screen: &mut Screen, show_mark: bool, tabs: bool) -
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.label(semibold("GigEyes", 24.0));
-            ui.label(RichText::new("Hear a tone. See where the knobs sit.").weak());
+            ui.label(RichText::new("Hear a tone. Get the chain to play it.").weak());
         });
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if !tabs {
@@ -2241,239 +2505,173 @@ fn input_row(ui: &mut egui::Ui, link: &mut String, compact: bool, busy: bool) ->
     (pick, load)
 }
 
-fn report(ui: &mut egui::Ui, name: &str, tone: &Tone, reveal: f32) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(name).weak());
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            let secs = tone.seconds.round() as u32;
-            ui.label(RichText::new(format!("{}:{:02} listened", secs / 60, secs % 60)).weak());
-        });
-    });
-    ui.add_space(4.0);
-    ui.label(semibold(&tone.verdict, 26.0));
-    ui.add_space(20.0);
+/// Height of every node on the chain, so the wires line up.
+const BLOCK: Vec2 = Vec2::new(150.0, 128.0);
 
-    amp_panel(ui, &tone.knobs, reveal, true);
-    ui.add_space(14.0);
-
-    card(ui, |ui| {
-        ui.label(semibold("EQ curve", 17.0));
-        ui.label(
-            RichText::new("Above the line is louder than average, below is quieter. Hover a bar for its value.")
-                .size(13.0)
-                .weak(),
-        );
-        ui.add_space(12.0);
-        eq_chart(ui, tone, reveal);
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new(format!(
-                "Slope {:.1} dB per octave  ·  Peak-to-average {:.1} dB",
-                tone.tilt_db_per_octave, tone.crest_db
-            ))
-            .size(12.0)
-            .weak(),
-        );
-    });
+fn semibold_font(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("semibold".into()))
 }
 
-/// Five amp knobs on one panel. Before any result (`live` false) they wait at noon, greyed out.
-fn amp_panel(ui: &mut egui::Ui, knobs: &[Knob], reveal: f32, live: bool) {
-    card(ui, |ui| {
-        ui.label(semibold("Where an amp would sit", 17.0));
-        let caption = if live {
-            "Starting points on an amp with its EQ flat at noon. Hover a knob for the measurement."
-        } else {
-            "Drop something in and the knobs turn to match it."
-        };
-        ui.label(RichText::new(caption).size(13.0).weak());
-        ui.add_space(14.0);
-        ui.columns(knobs.len(), |cols| {
-            for (col, knob) in cols.iter_mut().zip(knobs) {
-                dial(col, knob, reveal, live);
-            }
-        });
-    });
-}
-
-fn waiting_knobs() -> Vec<Knob> {
-    ["Gain", "Bass", "Middle", "Treble", "Presence"]
-        .map(|label| Knob {
-            label,
-            value: 5.0,
-            verdict: " ", // keeps the row's height, so nothing jumps when the result lands
-            detail: "Nothing listened to yet.".into(),
-        })
-        .into()
-}
-
-/// One amp knob: label, a dial with 0–10 ticks turned to the knob's value, the value and its verdict.
-fn dial(ui: &mut egui::Ui, knob: &Knob, reveal: f32, live: bool) {
-    ui.vertical_centered(|ui| {
-        ui.label(RichText::new(knob.label).weak());
-        let (rect, response) =
-            ui.allocate_exact_size(Vec2::new(ui.available_width(), 86.0), Sense::hover());
-        let painter = ui.painter_at(rect);
-        let c = rect.center();
-        let r = (rect.height() / 2.0 - 10.0).min(rect.width() / 2.0 - 10.0);
-        // 270° sweep from bottom-left (0) over the top to bottom-right (10); screen y points down.
-        let start = 0.75 * std::f32::consts::PI;
-        let angle_at = |v: f32| start + v / 10.0 * 1.5 * std::f32::consts::PI;
-        let at = |a: f32, radius: f32| c + Vec2::new(a.cos(), a.sin()) * radius;
-        let arc = |from: f32, to: f32, radius: f32| -> Vec<Pos2> {
-            let n = ((to - from).abs() * 20.0).ceil().max(2.0) as usize;
-            (0..=n)
-                .map(|i| at(from + (to - from) * i as f32 / n as f32, radius))
-                .collect()
-        };
-
-        for tick in 0..=10 {
-            painter.circle_filled(
-                at(angle_at(tick as f32), r + 7.0),
-                if tick % 5 == 0 { 1.8 } else { 1.2 },
-                muted(),
-            );
-        }
-        let value = if live {
-            knob.value * reveal
-        } else {
-            knob.value
-        };
-        let (arc_colour, pointer) = if live {
-            (accent(), ink())
-        } else {
-            (line(), muted())
-        };
-        painter.add(Shape::line(
-            arc(angle_at(0.0), angle_at(10.0), r),
-            Stroke::new(3.0, raised()),
-        ));
-        painter.add(Shape::line(
-            arc(angle_at(0.0), angle_at(value), r),
-            Stroke::new(3.0, arc_colour),
-        ));
-        painter.circle(c, r - 7.0, raised(), Stroke::new(1.0, line()));
-        painter.line_segment(
-            [
-                at(angle_at(value), (r - 7.0) * 0.25),
-                at(angle_at(value), r - 11.0),
-            ],
-            Stroke::new(3.0, pointer),
-        );
-
-        response.on_hover_text(&knob.detail);
-        let shown = if live {
-            format!("{value:.1}")
-        } else {
-            "–".into()
-        };
-        ui.label(semibold(shown, 20.0));
-        ui.label(RichText::new(knob.verdict).size(13.0).weak());
-    });
-}
-
-/// Bars around a 0 dB line, with the main frequency regions marked and a value on hover.
-fn eq_chart(ui: &mut egui::Ui, tone: &Tone, reveal: f32) {
-    let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 210.0), Sense::hover());
-    let painter = ui.painter_at(rect);
-    let plot = egui::Rect::from_min_max(
-        rect.min + Vec2::new(0.0, 22.0),
-        rect.max - Vec2::new(0.0, 20.0),
-    );
-    let range_db = tone.levels_db.iter().fold(12.0f32, |m, l| m.max(l.abs()));
-    let mid_y = plot.center().y;
-    let y_for = |db: f32| mid_y - db * reveal / range_db * plot.height() / 2.0;
-    let slot = plot.width() / tone.levels_db.len() as f32;
-    let (first, last) = (
-        tone.centers[0].log2(),
-        tone.centers[tone.centers.len() - 1].log2(),
-    );
-    let x_for_hz = |hz: f32| {
-        plot.left() + slot * 0.5 + (hz.log2() - first) / (last - first) * (plot.width() - slot)
-    };
-
-    painter.rect_filled(rect, CornerRadius::same(RADIUS - 2), well());
-    // Frequency regions, every other one a tone step lighter, named along the top.
-    let regions = [
-        (60.0, 250.0, "Lows"),
-        (250.0, 800.0, "Low mids"),
-        (800.0, 2000.0, "Mids"),
-        (2000.0, 5000.0, "Highs"),
-        (5000.0, 12_000.0, "Air"),
-    ];
-    for (i, (lo, hi, label)) in regions.iter().enumerate() {
-        let x0 = x_for_hz(*lo).max(plot.left());
-        let x1 = x_for_hz(*hi).min(plot.right());
-        if x1 <= x0 {
-            continue;
-        }
-        if i % 2 == 1 {
-            painter.rect_filled(
-                egui::Rect::from_x_y_ranges(x0..=x1, plot.y_range()),
-                0.0,
-                surface().gamma_multiply(0.7),
-            );
-        }
-        painter.text(
-            egui::pos2((x0 + x1) / 2.0, rect.top() + 4.0),
-            Align2::CENTER_TOP,
-            *label,
-            FontId::proportional(12.0),
-            muted(),
-        );
-    }
-    painter.line_segment(
-        [plot.left_center(), plot.right_center()],
-        Stroke::new(1.0, line()),
-    );
-
-    let hovered = response
-        .hover_pos()
-        .filter(|p| plot.x_range().contains(p.x))
-        .map(|p| (((p.x - plot.left()) / slot) as usize).min(tone.levels_db.len() - 1));
-    for (i, db) in tone.levels_db.iter().enumerate() {
-        let x = plot.left() + slot * (i as f32 + 0.5);
-        let (top, bottom) = if *db >= 0.0 {
-            (y_for(*db), mid_y)
-        } else {
-            (mid_y, y_for(*db))
-        };
-        let bar = egui::Rect::from_x_y_ranges(
-            x - slot * 0.3..=x + slot * 0.3,
-            top..=bottom.max(top + 1.0),
-        );
-        let colour = if hovered == Some(i) { ink() } else { accent() };
-        painter.rect_filled(bar, 3.0, colour);
-    }
-    for (hz, label) in [(100.0, "100 Hz"), (1000.0, "1 kHz"), (10_000.0, "10 kHz")] {
-        let x = x_for_hz(hz);
-        if plot.x_range().contains(x) {
-            painter.text(
-                egui::pos2(x, rect.bottom() - 3.0),
-                Align2::CENTER_BOTTOM,
-                label,
-                FontId::proportional(12.0),
-                muted(),
-            );
-        }
-    }
-    painter.rect_stroke(
-        rect,
-        CornerRadius::same(RADIUS - 2),
+/// "Guitar" and "Output" at the two ends of the chain.
+fn end_node(ui: &mut egui::Ui, label: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(80.0, BLOCK.y), Sense::hover());
+    let pill = egui::Rect::from_center_size(rect.center(), Vec2::new(80.0, 36.0));
+    let painter = ui.painter();
+    painter.rect(
+        pill,
+        CornerRadius::same(18),
+        well(),
         Stroke::new(1.0, line()),
         StrokeKind::Inside,
     );
+    painter.text(
+        pill.center(),
+        Align2::CENTER_CENTER,
+        label,
+        semibold_font(14.0),
+        ink(),
+    );
+}
 
-    if let Some(i) = hovered {
-        let hz = tone.centers[i];
-        let freq = if hz >= 1000.0 {
-            format!("{:.1} kHz", hz / 1000.0)
-        } else {
-            format!("{hz:.0} Hz")
-        };
-        response.on_hover_text_at_pointer(format!("{freq}: {:+.1} dB", tone.levels_db[i]));
+/// The cable between two nodes, ending in a dot where it plugs in.
+fn wire(ui: &mut egui::Ui, live: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(26.0, BLOCK.y), Sense::hover());
+    let y = rect.center().y;
+    let colour = if live { accent() } else { line() };
+    let painter = ui.painter();
+    painter.line_segment(
+        [Pos2::new(rect.left(), y), Pos2::new(rect.right() - 3.0, y)],
+        Stroke::new(2.0, colour.gamma_multiply(0.6)),
+    );
+    painter.circle_filled(Pos2::new(rect.right() - 3.0, y), 3.0, colour);
+}
+
+/// One plugin on the chain: the stage, the plugin and model to load, and the gear it stands for.
+fn block_card(
+    ui: &mut egui::Ui,
+    block: &chain::Block,
+    pick: Option<&chain::Pick>,
+    open: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(BLOCK, Sense::click());
+    let up = if response.hovered() || open { 1.0 } else { 0.0 };
+    let lift = spring(ui.ctx(), response.id.with("lift"), up, 0.25);
+    let rect = rect.translate(Vec2::new(0.0, -3.0 * lift));
+    let painter = ui.painter();
+    let stroke = if open {
+        Stroke::new(1.5, accent())
+    } else {
+        Stroke::new(1.0, line().lerp_to_gamma(muted(), 0.4 * lift))
+    };
+    painter.rect(
+        rect,
+        CornerRadius::same(RADIUS),
+        raised(),
+        stroke,
+        StrokeKind::Inside,
+    );
+    let inner = rect.shrink2(Vec2::new(12.0, 10.0));
+    let fit = |text: &str, font: FontId, colour: Color32, rows: usize| {
+        let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, colour, inner.width());
+        job.wrap.max_rows = rows;
+        painter.layout_job(job)
+    };
+    let mut y = inner.top();
+    let mut put = |galley: Arc<egui::Galley>| {
+        let height = galley.size().y;
+        painter.galley(Pos2::new(inner.left(), y), galley, ink());
+        y += height + 2.0;
+    };
+    put(fit(
+        block.stage.label(),
+        FontId::proportional(12.0),
+        muted(),
+        1,
+    ));
+    match pick {
+        Some(p) => {
+            put(fit(&p.plugin, semibold_font(15.0), ink(), 2));
+            if !p.model.is_empty() {
+                put(fit(&p.model, FontId::proportional(13.0), ink(), 1));
+            }
+        }
+        None => put(fit(
+            "Nothing in your rig",
+            FontId::proportional(14.0),
+            muted(),
+            2,
+        )),
     }
+    let (foot, colour) = match (&block.real, pick) {
+        (Some(real), Some(p)) if !p.exact => (format!("Stand-in for {}", real.gear), accent()),
+        (Some(real), _) => (real.gear.clone(), muted()),
+        (None, _) => ("From the recording".to_string(), muted()),
+    };
+    let foot = fit(&foot, FontId::proportional(12.0), colour, 2);
+    let at = Pos2::new(inner.left(), inner.bottom() - foot.size().y);
+    painter.galley(at, foot, colour);
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// The chain before there's a result: the ends wired to empty slots.
+fn empty_chain(ui: &mut egui::Ui, caption: &str) {
+    ui.label(semibold("Your chain", 17.0));
+    ui.label(RichText::new(caption).size(13.0).weak());
+    ui.add_space(16.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        end_node(ui, "Guitar");
+        for stage in ["Drive", "Amp"] {
+            wire(ui, false);
+            let (rect, _) = ui.allocate_exact_size(BLOCK, Sense::hover());
+            let painter = ui.painter();
+            painter.rect_stroke(
+                rect,
+                CornerRadius::same(RADIUS),
+                Stroke::new(1.0, line()),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                rect.center(),
+                Align2::CENTER_CENTER,
+                stage,
+                FontId::proportional(14.0),
+                muted(),
+            );
+        }
+        wire(ui, false);
+        end_node(ui, "Output");
+    });
+}
+
+/// The plugin picked for a block: the one swapped in, else the best fit.
+fn chosen<'a>(
+    block: &'a chain::Block,
+    picked: &std::collections::HashMap<String, String>,
+) -> Option<&'a chain::Pick> {
+    picked
+        .get(&block.key())
+        .and_then(|name| block.picks.iter().find(|p| &p.plugin == name))
+        .or(block.picks.first())
+}
+
+/// "Helix Native · Brit 2203 (stand-in)", for the swap menu.
+fn pick_label(p: &chain::Pick) -> String {
+    let model = if p.model.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", p.model)
+    };
+    let stand_in = if p.exact { "" } else { " (stand-in)" };
+    format!("{}{model}{stand_in}", p.plugin)
+}
+
+/// "www.example.com/a/b" → "example.com".
+fn domain(url: &str) -> &str {
+    url.split('/')
+        .nth(2)
+        .unwrap_or_default()
+        .trim_start_matches("www.")
 }
 
 /// While a file is dragged over the window: dim everything and say what will happen.

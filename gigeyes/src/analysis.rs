@@ -7,6 +7,7 @@ const BANDS: usize = 24;
 const LOW_HZ: f32 = 60.0;
 const HIGH_HZ: f32 = 12_000.0;
 
+#[allow(dead_code)] // the band levels and slope only feed the knobs and the tests now
 pub struct Tone {
     /// Band centre frequencies in Hz.
     pub centers: Vec<f32>,

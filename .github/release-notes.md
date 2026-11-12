@@ -4,7 +4,15 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.2.3: smoother, and easier to fix a lookup**
+**New in 0.7.3: the Tone page shows a chain**
+- **Your chain instead of knobs.** After a song is read, the Tone page lays out a signal chain like a Gig Performer rackspace: Guitar, then a block per plugin, then Output. Each block names which of your plugins to load and which model to pick in it.
+- **One button builds it.** **Build the chain** searches the web for the song once (or uses the saved search), lets the local AI read the pages, and turns the gear they name into blocks in playing order: wah, drives, amp, cabinet, modulation, delay, reverb.
+- **The recording fills the gaps.** If no source names the amp, GigEyes picks one by how driven the recording sounds, and the amp block gets starting settings measured from it.
+- **Stand-ins.** Gear none of your plugins models gets the closest plugin you have, marked as a stand-in, e.g. a Klon Centaur played through your TSE808.
+- **Click a block** for the sentence and page it comes from, the settings, and a menu to swap in another of your plugins that can do the job.
+- The sources and the full gear list are still there, folded up under the chain.
+
+**In 0.7.2.3: smoother, and easier to fix a lookup**
 - **Switching tabs slides.** The page glides in from the side of the tab you picked.
 - **Animations always play.** They used to switch off when Windows' "Animation effects" setting was off; now GigEyes animates the same on every PC, with nothing to change in Windows.
 - **Look it up again is always there** under a looked-up plugin, instead of hidden in "Where this comes from".
