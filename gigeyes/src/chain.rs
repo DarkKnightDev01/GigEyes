@@ -53,16 +53,39 @@ impl Stage {
     fn types(self) -> &'static [&'static str] {
         match self {
             Stage::Wah => &["wah or filter", "multi-effect suite"],
-            Stage::Compressor => &["compressor", "multi-effect suite"],
+            Stage::Compressor => &["compressor", "multi-effect suite", "capture loader"],
             Stage::Pitch => &["pitch", "multi-effect suite"],
-            Stage::Fuzz => &["fuzz", "distortion", "multi-effect suite"],
-            Stage::Overdrive => &["overdrive", "boost", "distortion", "multi-effect suite"],
-            Stage::Distortion => &["distortion", "overdrive", "fuzz", "multi-effect suite"],
-            Stage::Boost => &["boost", "overdrive", "EQ", "multi-effect suite"],
-            Stage::Other => &["multi-effect suite"],
+            Stage::Fuzz => &["fuzz", "distortion", "multi-effect suite", "capture loader"],
+            Stage::Overdrive => &[
+                "overdrive",
+                "boost",
+                "distortion",
+                "multi-effect suite",
+                "capture loader",
+            ],
+            Stage::Distortion => &[
+                "distortion",
+                "overdrive",
+                "fuzz",
+                "multi-effect suite",
+                "capture loader",
+            ],
+            Stage::Boost => &[
+                "boost",
+                "overdrive",
+                "EQ",
+                "multi-effect suite",
+                "capture loader",
+            ],
+            Stage::Other => &["multi-effect suite", "capture loader"],
             Stage::Gate => &["noise gate", "multi-effect suite"],
-            Stage::Amp => &["amp sim", "preamp", "multi-effect suite"],
-            Stage::Cabinet => &["cabinet or IR loader", "amp sim", "multi-effect suite"],
+            Stage::Amp => &["amp sim", "preamp", "multi-effect suite", "capture loader"],
+            Stage::Cabinet => &[
+                "cabinet or IR loader",
+                "amp sim",
+                "multi-effect suite",
+                "capture loader",
+            ],
             Stage::Eq => &["EQ", "multi-effect suite"],
             Stage::Modulation => &["modulation", "multi-effect suite"],
             Stage::Delay => &["delay", "multi-effect suite"],
@@ -79,6 +102,8 @@ pub struct Pick {
     pub model: String,
     /// It models the very gear the source names; false for a stand-in.
     pub exact: bool,
+    /// A capture loader (TONE3000, NAM): get a capture of the named gear and load it.
+    pub capture: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -159,10 +184,11 @@ pub fn build(
                     plugin: m.plugin.to_string(),
                     model,
                     exact: true,
+                    capture: false,
                 });
             }
         }
-        add_stand_ins(&mut picks, stage, knowledge, rig, gain);
+        add_stand_ins(&mut picks, stage, Some(&f.gear), knowledge, rig, gain);
         blocks.push(Block {
             stage,
             real: Some(f.clone()),
@@ -175,7 +201,7 @@ pub fn build(
 
     if !blocks.iter().any(|b| b.stage == Stage::Amp) {
         let mut picks = vec![];
-        add_stand_ins(&mut picks, Stage::Amp, knowledge, rig, gain);
+        add_stand_ins(&mut picks, Stage::Amp, None, knowledge, rig, gain);
         let sound = match gain {
             Gain::High => "high-gain",
             Gain::Crunch => "crunchy",
@@ -195,7 +221,7 @@ pub fn build(
         .any(|p| p.owned && plugin_type(p, knowledge).as_deref() == Some("cabinet or IR loader"));
     if has_ir_loader && !blocks.iter().any(|b| b.stage == Stage::Cabinet) {
         let mut picks = vec![];
-        add_stand_ins(&mut picks, Stage::Cabinet, knowledge, rig, gain);
+        add_stand_ins(&mut picks, Stage::Cabinet, None, knowledge, rig, gain);
         picks.retain(|p| {
             rig.iter()
                 .find(|r| r.name == p.plugin)
@@ -227,6 +253,7 @@ pub fn build(
 fn add_stand_ins(
     picks: &mut Vec<Pick>,
     stage: Stage,
+    gear: Option<&str>,
     knowledge: &Knowledge,
     rig: &[Plugin],
     gain: Gain,
@@ -239,12 +266,30 @@ fn add_stand_ins(
         let known = knowledge.about(&p.name);
         let models_it =
             known.is_some_and(|k| k.gear().any(|m| stage_of(&m.kind, &m.gear) == Some(stage)));
-        let rank = plugin_type(p, knowledge)
+        let kind = plugin_type(p, knowledge);
+        let capture = kind.as_deref() == Some("capture loader");
+        let rank = kind
             .and_then(|t| stage.types().iter().position(|s| *s == t))
             .or(models_it.then_some(stage.types().len()));
         let Some(rank) = rank else {
             continue;
         };
+        if capture {
+            // A capture of the very unit beats a different unit modelled; with no unit named
+            // there's nothing to search for, so it goes last.
+            if let Some(gear) = gear {
+                fits.push((
+                    0,
+                    Pick {
+                        plugin: p.name.clone(),
+                        model: format!("{gear} capture"),
+                        exact: false,
+                        capture: true,
+                    },
+                ));
+                continue;
+            }
+        }
         let model = known.map_or(String::new(), |k| {
             let fitting: Vec<&Finding> = k
                 .gear()
@@ -271,19 +316,64 @@ fn add_stand_ins(
                 plugin: p.name.clone(),
                 model,
                 exact: false,
+                capture,
             },
         ));
     }
-    fits.sort_by_key(|(rank, _)| *rank);
+    fits.sort_by_key(|(rank, p)| (*rank, !p.capture));
     picks.extend(fits.into_iter().map(|(_, p)| p));
 }
 
-/// The plugin's type: what a lookup found, else a guess from the category in its bundle.
+/// The plugin's type: what a lookup found, else a guess from the category in its bundle. Two
+/// kinds lookups don't name are worked out here: a capture loader (TONE3000, NAM), and an amp sim
+/// that is really a whole rig with pedals and effects (AmpliTube, Helix).
 pub fn plugin_type(plugin: &Plugin, knowledge: &Knowledge) -> Option<String> {
-    if let Some(kind) = knowledge.about(&plugin.name).and_then(|k| k.kind())
-        && kind != "unknown"
-        && kind != "other"
+    let known = knowledge.about(&plugin.name);
+    let facts: String = known
+        .map(|k| {
+            k.facts()
+                .map(|f| f.gear.to_lowercase())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+    let name = format!("{} {}", plugin.name, plugin.vendor).to_lowercase();
+    let either = |terms: &[&str]| terms.iter().any(|t| name.contains(t) || facts.contains(t));
+    // "capture" only in the name: plenty of amp sims say they capture an amp's feel.
+    if name.contains("capture")
+        || either(&[
+            "tone3000",
+            "tonehunt",
+            "neural amp modeler",
+            "tonex",
+            "nam captures",
+        ])
     {
+        return Some("capture loader".into());
+    }
+    let looked_up = known
+        .and_then(|k| k.kind())
+        .filter(|kind| *kind != "unknown" && *kind != "other");
+    let amp_like = matches!(looked_up, None | Some("amp sim" | "preamp"));
+    // shortcut: the named suites are the common ones; others count once a lookup shows pedals.
+    let suite = either(&[
+        "amplitube",
+        "helix",
+        "guitar rig",
+        "bias fx",
+        "tonelib",
+        "effects",
+        "stompbox",
+        "stomps",
+        "pedals",
+    ]) || known.is_some_and(|k| {
+        k.gear().any(|m| m.kind == "amp")
+            && k.gear().any(|m| m.kind != "amp" && m.kind != "cabinet")
+    });
+    if amp_like && suite {
+        return Some("multi-effect suite".into());
+    }
+    if let Some(kind) = looked_up {
         return Some(kind.to_string());
     }
     let vst = plugin.kind.to_lowercase();
@@ -650,6 +740,57 @@ mod tests {
         let amps: Vec<&Block> = chain.iter().filter(|b| b.stage == Stage::Amp).collect();
         assert_eq!(amps.len(), 1);
         assert_eq!(amps[0].also, ["Vox AC30"]);
+    }
+
+    #[test]
+    fn amp_sims_with_effects_and_capture_loaders_fill_effect_slots() {
+        // As lookups really type them: AmpliTube as an amp sim, TONE3000 with a capture as gear.
+        let rig = vec![
+            plugin("AmpliTube 5", ""),
+            plugin("TONE3000", ""),
+            plugin("Gateway", ""),
+        ];
+        let mut k = Knowledge::default();
+        k.set(
+            "AmpliTube 5",
+            vec![typed("amp sim"), found("Marshall JCM800", "amp", "")],
+        );
+        k.set(
+            "TONE3000",
+            vec![
+                typed("amp sim"),
+                found("Jext Telez The Black Sheep", "amp", ""),
+            ],
+        );
+        k.set(
+            "Gateway",
+            vec![typed("amp sim"), found("Marshall JCM800 2203", "amp", "")],
+        );
+        let findings = vec![
+            found("Chorus pedal (model unknown)", "effect", ""),
+            found("Delay pedal", "effect", ""),
+            found("MXR M222 Talk Box", "pedal", ""),
+        ];
+        let chain = build(&findings, &k, &rig, &tone(12.0));
+        let at = |stage| chain.iter().find(|b| b.stage == stage).unwrap();
+        let only = |stage| {
+            at(stage)
+                .picks
+                .iter()
+                .map(|p| p.plugin.as_str())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(only(Stage::Modulation), ["AmpliTube 5"]);
+        assert_eq!(only(Stage::Delay), ["AmpliTube 5"]);
+        let talk = &at(Stage::Other).picks[0];
+        assert_eq!((talk.plugin.as_str(), talk.capture), ("TONE3000", true));
+        assert_eq!(talk.model, "MXR M222 Talk Box capture");
+        let amp = only(Stage::Amp);
+        assert_eq!(
+            amp.last(),
+            Some(&"TONE3000"),
+            "with no amp named, a capture loader goes last"
+        );
     }
 
     #[test]

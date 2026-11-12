@@ -4,7 +4,12 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.7.3: the Tone page shows a chain**
+**New in 0.7.3.1: fixes to the chain**
+- **Amp sims with effects fill effect slots.** AmpliTube, Helix, Guitar Rig and other amp sims whose lookup shows pedals or effects are now offered for chorus, delay, reverb and other effect blocks, instead of "Nothing in your rig".
+- **Capture loaders get the real unit.** For gear none of your plugins models, TONE3000, NAM and ToneX now come first with "Find a capture of" the named unit (say, an MXR M222 Talk Box), instead of an unrelated capture from the lookup.
+- A long file name no longer runs under the "listened" time.
+
+**In 0.7.3: the Tone page shows a chain**
 - **Your chain instead of knobs.** After a song is read, the Tone page lays out a signal chain like a Gig Performer rackspace: Guitar, then a block per plugin, then Output. Each block names which of your plugins to load and which model to pick in it.
 - **One button builds it.** **Build the chain** searches the web for the song once (or uses the saved search), lets the local AI read the pages, and turns the gear they name into blocks in playing order: wah, drives, amp, cabinet, modulation, delay, reverb.
 - **The recording fills the gaps.** If no source names the amp, GigEyes picks one by how driven the recording sounds, and the amp block gets starting settings measured from it.

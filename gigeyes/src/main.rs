@@ -372,7 +372,12 @@ impl App {
             return;
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new(name).weak());
+            // Long file names end in "…" instead of running under the time.
+            let room = ui.available_width() - 120.0;
+            ui.scope(|ui| {
+                ui.set_max_width(room);
+                ui.add(egui::Label::new(RichText::new(name).weak()).truncate());
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let secs = tone.seconds.round() as u32;
                 ui.label(RichText::new(format!("{}:{:02} listened", secs / 60, secs % 60)).weak());
@@ -528,6 +533,10 @@ impl App {
                         }
                     };
                     let what = match (&pick, &block.real) {
+                        (Some(p), Some(real)) if p.capture => format!(
+                            "None of your plugins models the {}. Load {} and find a capture of it: people upload captures of real gear, so search for \"{}\".",
+                            real.gear, p.plugin, real.gear
+                        ),
                         (Some(p), Some(real)) if p.exact => {
                             format!("{} models the {}. Load it{}.", p.plugin, real.gear, model(p))
                         }
@@ -2603,6 +2612,9 @@ fn block_card(
         )),
     }
     let (foot, colour) = match (&block.real, pick) {
+        (Some(real), Some(p)) if p.capture => {
+            (format!("Find a capture of {}", real.gear), accent())
+        }
         (Some(real), Some(p)) if !p.exact => (format!("Stand-in for {}", real.gear), accent()),
         (Some(real), _) => (real.gear.clone(), muted()),
         (None, _) => ("From the recording".to_string(), muted()),
@@ -2662,7 +2674,11 @@ fn pick_label(p: &chain::Pick) -> String {
     } else {
         format!(" · {}", p.model)
     };
-    let stand_in = if p.exact { "" } else { " (stand-in)" };
+    let stand_in = match (p.exact, p.capture) {
+        (true, _) => "",
+        (false, true) => " (capture)",
+        (false, false) => " (stand-in)",
+    };
     format!("{}{model}{stand_in}", p.plugin)
 }
 
