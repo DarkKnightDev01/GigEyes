@@ -4,7 +4,12 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8.0.4**
+**New in 0.8.1: every effect says how far to turn it**
+- **Starting points.** When no source gives settings for a chorus, delay, reverb, drive or compressor, GigEyes no longer leaves the knobs at "default". It lists the usual knobs for that kind of effect with where players usually start (a chorus: rate 3, depth 5, mix 5 of 10; a reverb: decay 4, mix 2.5; a delay: feedback 3, mix 3, time from the song's tempo). They're marked "starting point": dial them in by ear from there.
+- **This works in AmpliTube and other suites even when GigEyes can't find which model to use.** Add any chorus (or delay, reverb) in the suite and start from the listed settings.
+- **You can see it working.** While it looks up a suite's models it says whether it's searching the web or the local AI is reading pages.
+
+**In 0.8.0.4**
 - On a PC without a graphics card the local AI now gets up to an hour per page instead of 15 minutes. Long pages, such as Helix's model list, were giving up with "couldn't read the pages".
 
 **In 0.8.0.3**

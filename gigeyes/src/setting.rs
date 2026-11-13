@@ -1,6 +1,7 @@
 //! What to set each knob of a block's plugin to. The knob names come from the plugin itself, or for
 //! one model inside a suite, from its manual on the web. Each value comes from a source that names
-//! it, else from the recording where it can tell, else the knob stays at its default.
+//! it, else from the recording where it can tell, else from a usual starting point for that kind
+//! of effect, else the knob stays at its default.
 
 use crate::analysis::Tone;
 use crate::chain::{Pick, Stage};
@@ -11,6 +12,8 @@ use crate::knowledge::{Knowledge, ModelKnobs};
 pub enum From {
     Source,
     Recording,
+    /// Where players usually start with this kind of effect.
+    Start,
     Default,
 }
 
@@ -334,6 +337,7 @@ fn delay_time(bpm: f32, knob: Option<&Knob>) -> (String, String) {
 /// text of the gear the block stands for. Knobs to change come first.
 pub fn dial(
     stage: Stage,
+    effect: Option<&str>,
     knobs: &[(String, Option<&Knob>)],
     source: &str,
     tone: &Tone,
@@ -381,6 +385,27 @@ pub fn dial(
                     why,
                 };
             }
+            if stage == Stage::Delay && role == Some("time") {
+                // A quarter note at 150 BPM.
+                let (value, _) = delay_time(150.0, *knob);
+                return Setting {
+                    knob: name.clone(),
+                    value,
+                    from: From::Start,
+                    why: "The recording has no clear beat to time it to. 400 ms is a usual start; set it by ear.".into(),
+                };
+            }
+            if let Some(at) = role.and_then(|r| start(stage, effect, r)) {
+                let what = effect.unwrap_or(stage.label()).to_lowercase();
+                return Setting {
+                    knob: name.clone(),
+                    value: on_knob(at, *knob),
+                    from: From::Start,
+                    why: format!(
+                        "No source says. This is where a {what} usually starts; set it by ear against the recording."
+                    ),
+                };
+            }
             let value = knob.map_or(String::new(), |k| {
                 if k.default.is_empty() || k.units.is_empty() || k.default.parse::<f32>().is_err() {
                     k.default.clone()
@@ -400,8 +425,40 @@ pub fn dial(
     out
 }
 
+/// Where a knob of this role usually starts, 0 to 10, for an effect no source gives settings for.
+/// `effect` is the kind of effect ("chorus"), from `chain::effect_word`.
+fn start(stage: Stage, effect: Option<&str>, role: &str) -> Option<f32> {
+    let at = match (stage, effect.unwrap_or(""), role) {
+        (Stage::Modulation, "flanger", "rate") => 2.0,
+        (Stage::Modulation, "flanger", "depth") => 6.0,
+        (Stage::Modulation, "flanger", "feedback") => 5.0,
+        (Stage::Modulation, "phaser", "feedback") => 3.0,
+        (Stage::Modulation, "tremolo" | "vibrato", "rate") => 5.0,
+        (Stage::Modulation, "vibrato", "depth") => 4.0,
+        // A vibrato is all pitch wobble, no dry sound.
+        (Stage::Modulation, "vibrato", "mix") => 10.0,
+        (Stage::Modulation, _, "rate") => 3.0,
+        (Stage::Modulation, _, "depth" | "mix") => 5.0,
+        (Stage::Delay, _, "feedback" | "mix") => 3.0,
+        (Stage::Reverb, _, "decay") => 4.0,
+        (Stage::Reverb, _, "mix") => 2.5,
+        (Stage::Boost, _, "gain") => 2.0,
+        (Stage::Boost, _, "level") => 7.0,
+        (Stage::Overdrive, _, "gain") => 4.0,
+        (Stage::Overdrive, _, "level") => 6.0,
+        (Stage::Distortion, _, "gain") => 6.0,
+        (Stage::Fuzz, _, "gain") => 7.0,
+        (Stage::Overdrive | Stage::Distortion | Stage::Fuzz | Stage::Boost, _, "tone") => 5.0,
+        (Stage::Distortion | Stage::Fuzz, _, "level") => 5.0,
+        (Stage::Compressor, _, "gain") => 4.0,
+        (Stage::Compressor, _, "level") => 5.0,
+        _ => return None,
+    };
+    Some(at)
+}
+
 /// When a plugin's own knob names can't be found: the knobs the source gives settings for, plus
-/// the ones every amp (or delay) has, under their usual names.
+/// the ones every effect of the stage has, under their usual names.
 pub fn usual(stage: Stage, source: &str) -> Vec<String> {
     const FILLER: [&str; 22] = [
         "at", "on", "to", "of", "the", "set", "around", "about", "o'clock", "oclock", "is",
@@ -418,7 +475,8 @@ pub fn usual(stage: Stage, source: &str) -> Vec<String> {
             names.push(name);
         }
     };
-    for s in said(source) {
+    // A label with no value ("Chorus pedal (model unknown)") isn't a knob.
+    for s in said(source).into_iter().filter(|s| s.value.is_some()) {
         let label = s
             .label
             .split_whitespace()
@@ -430,7 +488,13 @@ pub fn usual(stage: Stage, source: &str) -> Vec<String> {
     }
     let always: &[&str] = match stage {
         Stage::Amp => &["gain", "bass", "middle", "treble", "presence"],
-        Stage::Delay => &["time"],
+        Stage::Delay => &["time", "feedback", "mix"],
+        Stage::Modulation => &["rate", "depth", "mix"],
+        Stage::Reverb => &["decay", "mix"],
+        Stage::Overdrive | Stage::Distortion | Stage::Fuzz | Stage::Boost => {
+            &["drive", "tone", "level"]
+        }
+        Stage::Compressor => &["sustain", "level"],
         _ => &[],
     };
     always.iter().for_each(|a| add(a));
@@ -508,7 +572,13 @@ mod tests {
         ];
         let list: Vec<(String, Option<&Knob>)> =
             knobs.iter().map(|k| (k.name.clone(), Some(k))).collect();
-        let set = dial(Stage::Amp, &list, "Gain at 2 o'clock, bass on 4", &tone());
+        let set = dial(
+            Stage::Amp,
+            None,
+            &list,
+            "Gain at 2 o'clock, bass on 4",
+            &tone(),
+        );
         assert_eq!(
             (by(&set, "Gain").value.as_str(), by(&set, "Gain").from),
             ("7", From::Source)
@@ -540,6 +610,7 @@ mod tests {
         let list: Vec<(String, Option<&Knob>)> = names.into_iter().map(|n| (n, None)).collect();
         let set = dial(
             Stage::Amp,
+            None,
             &list,
             "Mids 7, Bass: 6, Gain at 2 o'clock, Reverb 3",
             &tone(),
@@ -548,8 +619,43 @@ mod tests {
         assert_eq!(by(&set, "Reverb").value, "3 of 10");
         assert_eq!(by(&set, "Gain").value, "7 of 10");
         assert_eq!(by(&set, "Treble").from, From::Recording);
-        assert_eq!(usual(Stage::Delay, ""), ["Time"]);
-        assert!(usual(Stage::Modulation, "").is_empty());
+        assert_eq!(usual(Stage::Delay, ""), ["Time", "Feedback", "Mix"]);
+        assert!(usual(Stage::Wah, "").is_empty());
+    }
+
+    #[test]
+    fn an_effect_no_source_sets_gets_a_starting_point() {
+        // The source names the pedal but no settings: that isn't a knob.
+        let source = "Chorus pedal (model unknown) chorus";
+        let names = usual(Stage::Modulation, source);
+        assert_eq!(names, ["Rate", "Depth", "Mix"]);
+        let mix = knob("Mix", "0", "100", "50", "%");
+        let list = [
+            ("Rate".to_string(), None),
+            ("Depth".to_string(), None),
+            ("Mix".to_string(), Some(&mix)),
+            ("Tone".to_string(), None),
+        ];
+        let set = dial(Stage::Modulation, Some("chorus"), &list, source, &tone());
+        assert_eq!(
+            (by(&set, "Rate").value.as_str(), by(&set, "Rate").from),
+            ("3 of 10", From::Start)
+        );
+        assert_eq!(by(&set, "Mix").value, "50 % (5 of 10)");
+        assert!(by(&set, "Rate").why.contains("a chorus usually starts"));
+        // A knob with no usual place for this effect stays at default.
+        assert_eq!(by(&set, "Tone").from, From::Default);
+        let flanger = dial(Stage::Modulation, Some("flanger"), &list, "", &tone());
+        assert_eq!(by(&flanger, "Depth").value, "6 of 10");
+        let mut no_beat = tone();
+        no_beat.tempo_bpm = None;
+        let delay = dial(Stage::Delay, None, &[("Time".into(), None)], "", &no_beat);
+        assert_eq!(
+            (delay[0].value.as_str(), delay[0].from),
+            ("400 ms", From::Start)
+        );
+        let reverb = dial(Stage::Reverb, None, &[("Decay".into(), None)], "", &tone());
+        assert!(reverb[0].why.contains("a reverb usually starts"));
     }
 
     #[test]
@@ -588,7 +694,8 @@ mod tests {
         let time = knob("Time", "1", "2000", "400", "ms");
         let set = dial(
             Stage::Delay,
-            &[("Time".into(), Some(&time)), ("Mix".into(), None)],
+            None,
+            &[("Time".into(), Some(&time)), ("Level".into(), None)],
             "",
             &tone(),
         );
@@ -596,7 +703,7 @@ mod tests {
             (by(&set, "Time").value.as_str(), by(&set, "Time").from),
             ("500 ms", From::Recording)
         );
-        assert_eq!(by(&set, "Mix").from, From::Default);
+        assert_eq!(by(&set, "Level").from, From::Default);
     }
 
     #[test]

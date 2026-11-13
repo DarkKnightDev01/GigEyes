@@ -563,6 +563,7 @@ impl App {
             ));
         }
         let source = block.real.as_ref().map_or("", |r| r.settings.as_str());
+        let effect = chain::effect_word(block.stage, block.real.as_ref().map(|r| r.gear.as_str()));
         // Whatever GigEyes can't find out about the plugin's knobs, the settings themselves still
         // stand: the ones the source gives and, for an amp, the ones heard in the recording.
         let or_usual = |why: String| {
@@ -576,14 +577,17 @@ impl App {
             let from = format!(
                 "{why} The knobs are listed under their usual names; yours may be called something else."
             );
-            Knobs::List(setting::dial(block.stage, &names, source, tone), from)
+            Knobs::List(
+                setting::dial(block.stage, effect, &names, source, tone),
+                from,
+            )
         };
         let doing = |fallback: String| Knobs::Wait(self.knob_doing.clone().unwrap_or(fallback));
         if let Some(word) = self.wants_models(block, pick) {
             let (key, plugin) = (model_key(&pick.plugin, word), &pick.plugin);
             return if self.knowledge.searched.contains(&key) {
                 or_usual(format!(
-                    "Couldn't find which {word} models {plugin} has. Add one in it and set it by ear."
+                    "Couldn't find which {word} models {plugin} has. Add any {word} in it and start from these settings."
                 ))
             } else if let Some(e) = self.knob_failed.get(&key) {
                 or_usual(format!(
@@ -634,7 +638,7 @@ impl App {
                 format!("Knobs of the {} from {}.", pick.model, domain(&found.url))
             }
         };
-        let set = setting::dial(block.stage, &setting::list(&names), source, tone);
+        let set = setting::dial(block.stage, effect, &setting::list(&names), source, tone);
         Knobs::List(set, from)
     }
 
@@ -1613,11 +1617,17 @@ impl App {
                         break;
                     }
                     let _ = tx.send(KnobNews::Now(format!(
-                        "Finding the {word} models in {plugin}…"
+                        "Searching the web for the {word} models in {plugin}…"
                     )));
                     ctx.request_repaint();
-                    let found = research::search_models(&key, plugin, vendor, word)
-                        .and_then(|pages| ai.models(&pages, word));
+                    let found = research::search_models(&key, plugin, vendor, word).and_then(|pages| {
+                        let _ = tx.send(KnobNews::Now(format!(
+                            "The local AI is reading {} pages about {plugin}'s {word} models. This can take a minute.",
+                            pages.sources.len()
+                        )));
+                        ctx.request_repaint();
+                        ai.models(&pages, word)
+                    });
                     let _ = tx.send(KnobNews::Models(plugin.clone(), word.to_string(), found));
                     ctx.request_repaint();
                 }
@@ -1626,11 +1636,17 @@ impl App {
                         break;
                     }
                     let _ = tx.send(KnobNews::Now(format!(
-                        "Looking up the knobs of the {name} in {plugin}…"
+                        "Searching the web for the knobs of the {name} in {plugin}…"
                     )));
                     ctx.request_repaint();
-                    let found = research::search_knobs(&key, plugin, vendor, name)
-                        .and_then(|pages| ai.knobs(&pages, plugin, name));
+                    let found = research::search_knobs(&key, plugin, vendor, name).and_then(|pages| {
+                        let _ = tx.send(KnobNews::Now(format!(
+                            "The local AI is reading {} pages about the {name}. This can take a minute.",
+                            pages.sources.len()
+                        )));
+                        ctx.request_repaint();
+                        ai.knobs(&pages, plugin, name)
+                    });
                     let _ = tx.send(KnobNews::Model(plugin.clone(), name.clone(), found));
                     ctx.request_repaint();
                 }
@@ -3049,10 +3065,8 @@ fn settings_list(ui: &mut egui::Ui, key: &str, set: &[setting::Setting], from: &
     ui.add_space(10.0);
     ui.label(semibold("Settings", 13.0));
     let summary = match (change.len(), leave.len()) {
-        (0, _) => {
-            "No source gives settings for this. Leave everything at default and adjust by ear."
-                .to_string()
-        }
+        (0, _) => "Nothing says how to set this. Leave everything at default and adjust by ear."
+            .to_string(),
         (n, 0) => format!("Set {n}."),
         (n, m) => format!("Set {n}, leave the other {m} at default."),
     };
@@ -3070,6 +3084,7 @@ fn settings_list(ui: &mut egui::Ui, key: &str, set: &[setting::Setting], from: &
                     let tag = match s.from {
                         From::Source => "from a source",
                         From::Recording => "from the recording",
+                        From::Start => "starting point",
                         From::Default => "",
                     };
                     ui.label(RichText::new(tag).size(12.0).weak())
