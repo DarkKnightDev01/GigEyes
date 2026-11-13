@@ -4,7 +4,13 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8.2: suites name the model to load**
+**New in 0.8.3: step-by-step build list, and no more gear you can't use**
+- **How to build it.** Under the chain there's now a numbered list in signal order: which plugin to add, which model or capture to load in it, and what to set each knob to. The last step says how to wire them in Gig Performer.
+- **No more talk boxes.** Gear GigEyes can't place in a guitar chain (a talk box, a tuner, a wireless) no longer gets a block.
+- **Captures only where they make sense.** TONE3000 is suggested for amps, cabs and drives, not for a compressor.
+- **Only gear from the record.** The local AI now keeps gear the page ties to that song or its album, not gear used live or on other songs.
+
+**In 0.8.2: suites name the model to load**
 - **Helix and other suites now get their own model names right.** Looking up a suite's chorus (or delay, reverb…) models used to return the real pedals it copies but not the suite's name for them, so the block couldn't say what to load. It now asks only for that effect's models and keeps a model only where the page pairs it with the unit it's based on. For Helix it names "70s Chorus" (BOSS CE-1).
 - **About 5 times faster**, since the local AI no longer lists every amp on the page.
 - Lookups that found nothing before are tried again.

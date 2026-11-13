@@ -456,9 +456,61 @@ impl App {
             ui.add_space(16.0);
             self.chain_row(ui);
             self.block_details(ui);
+            self.build_steps(ui);
             ui.add_space(16.0);
             self.build_controls(ui, ctx);
         });
+    }
+
+    /// The chain as numbered steps for Gig Performer: each plugin in signal order, what to load in
+    /// it and what to turn, then how to wire them.
+    fn build_steps(&mut self, ui: &mut egui::Ui) {
+        if self.chain.1.is_empty() {
+            return;
+        }
+        let blocks = self.chain.1.clone();
+        let mut steps: Vec<String> = blocks
+            .iter()
+            .map(|block| {
+                let pick = chosen(block, &self.chain_pick).cloned();
+                let knobs = self.knob_view(block, pick.as_ref());
+                step(block, pick.as_ref(), &knobs)
+            })
+            .collect();
+        ui.add_space(18.0);
+        ui.label(semibold("How to build it", 15.0));
+        ui.label(
+            RichText::new("In Gig Performer, add these plugins in this order.")
+                .size(13.0)
+                .weak(),
+        );
+        ui.add_space(6.0);
+        let wire = blocks
+            .iter()
+            .filter_map(|b| chosen(b, &self.chain_pick).map(|p| (b, p)))
+            .map(|(b, p)| match (&b.real, p.capture) {
+                (Some(real), true) => format!("{} ({})", p.plugin, real.gear),
+                _ if !p.model.is_empty() => format!("{} ({})", p.plugin, p.model),
+                _ => p.plugin.clone(),
+            })
+            .collect::<Vec<_>>();
+        if !wire.is_empty() {
+            steps.push(format!(
+                "Wire them: Audio Input → {} → Audio Output.",
+                wire.join(" → ")
+            ));
+        }
+        egui::Grid::new("build-steps")
+            .num_columns(2)
+            .min_col_width(0.0)
+            .spacing(Vec2::new(10.0, 8.0))
+            .show(ui, |ui| {
+                for (n, line) in steps.iter().enumerate() {
+                    ui.label(semibold(format!("{}.", n + 1), 13.0).color(accent()));
+                    ui.add(egui::Label::new(RichText::new(line).size(13.0).color(ink())).wrap());
+                    ui.end_row();
+                }
+            });
     }
 
     fn chain_row(&mut self, ui: &mut egui::Ui) {
@@ -3047,6 +3099,48 @@ fn chosen<'a>(
         .or(block.picks.first())
 }
 
+/// One block as a build step: "Add Helix Native and pick Brit 2203. Set Drive to 6, Bass to 5."
+fn step(block: &chain::Block, pick: Option<&chain::Pick>, knobs: &Knobs) -> String {
+    let what = block
+        .real
+        .as_ref()
+        .map_or(block.stage.label().to_lowercase(), |r| {
+            if knowledge::real_gear(&r.gear) {
+                r.gear.clone()
+            } else {
+                plain_gear(&r.gear)
+            }
+        });
+    let Some(p) = pick else {
+        return format!("Skip the {what}: none of your ticked plugins can do it.");
+    };
+    let load = if p.capture {
+        format!("Add {} and load a capture of the {what}.", p.plugin)
+    } else if p.model.is_empty() {
+        format!("Add {} for the {what}.", p.plugin)
+    } else {
+        format!("Add {} and pick {} for the {what}.", p.plugin, p.model)
+    };
+    let set = match knobs {
+        Knobs::List(set, _) => {
+            let turn: Vec<String> = set
+                .iter()
+                .filter(|s| s.from != setting::From::Default)
+                .map(|s| format!("{} to {}", s.knob, s.value))
+                .collect();
+            if turn.is_empty() {
+                " Leave its knobs at default.".to_string()
+            } else {
+                format!(" Set {}.", turn.join(", "))
+            }
+        }
+        Knobs::Wait(_) => " Settings are still being looked up.".to_string(),
+        Knobs::Missing(_) if p.capture => " Leave its own knobs at default.".to_string(),
+        Knobs::Missing(_) | Knobs::None => String::new(),
+    };
+    load + &set
+}
+
 /// What a block's details show about its knobs.
 enum Knobs {
     /// What to set each knob to, and where the knob names come from.
@@ -3168,4 +3262,67 @@ fn drop_overlay(ctx: &egui::Context, shown: f32) {
         FontId::new(24.0, FontFamily::Name("semibold".into())),
         Color32::WHITE.gamma_multiply(shown),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn amp(picks: Vec<chain::Pick>) -> chain::Block {
+        chain::Block {
+            stage: chain::Stage::Amp,
+            real: Some(ai::Finding {
+                gear: "Marshall JCM800 2203".into(),
+                kind: "amp".into(),
+                settings: String::new(),
+                quote: String::new(),
+                url: String::new(),
+                model: String::new(),
+            }),
+            also: vec![],
+            picks,
+            settings: String::new(),
+            note: String::new(),
+        }
+    }
+
+    #[test]
+    fn a_step_says_what_to_add_load_and_turn() {
+        let helix = chain::Pick {
+            plugin: "Helix Native".into(),
+            model: "Brit 2203".into(),
+            exact: true,
+            capture: false,
+        };
+        let set = vec![
+            setting::Setting {
+                knob: "Drive".into(),
+                value: "6 of 10".into(),
+                from: setting::From::Source,
+                why: String::new(),
+            },
+            setting::Setting {
+                knob: "Presence".into(),
+                value: "5 of 10".into(),
+                from: setting::From::Default,
+                why: String::new(),
+            },
+        ];
+        let block = amp(vec![helix.clone()]);
+        assert_eq!(
+            step(&block, Some(&helix), &Knobs::List(set, String::new())),
+            "Add Helix Native and pick Brit 2203 for the Marshall JCM800 2203. Set Drive to 6 of 10."
+        );
+        let tone3000 = chain::Pick {
+            plugin: "TONE3000".into(),
+            model: String::new(),
+            exact: false,
+            capture: true,
+        };
+        assert_eq!(
+            step(&block, Some(&tone3000), &Knobs::Missing(String::new())),
+            "Add TONE3000 and load a capture of the Marshall JCM800 2203. Leave its own knobs at default."
+        );
+        assert!(step(&amp(vec![]), None, &Knobs::None).starts_with("Skip the Marshall"));
+    }
 }
