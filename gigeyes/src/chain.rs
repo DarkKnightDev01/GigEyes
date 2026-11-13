@@ -18,7 +18,6 @@ pub enum Stage {
     Overdrive,
     Distortion,
     Boost,
-    Other,
     Gate,
     Amp,
     Cabinet,
@@ -38,7 +37,6 @@ impl Stage {
             Stage::Overdrive => "Overdrive",
             Stage::Distortion => "Distortion",
             Stage::Boost => "Boost",
-            Stage::Other => "Effect",
             Stage::Gate => "Noise gate",
             Stage::Amp => "Amp",
             Stage::Cabinet => "Cabinet",
@@ -53,7 +51,8 @@ impl Stage {
     fn types(self) -> &'static [&'static str] {
         match self {
             Stage::Wah => &["wah or filter", "multi-effect suite"],
-            Stage::Compressor => &["compressor", "multi-effect suite", "capture loader"],
+            // A capture copies a fixed sound: amps, cabs and drives, not a compressor's attack.
+            Stage::Compressor => &["compressor", "multi-effect suite"],
             Stage::Pitch => &["pitch", "multi-effect suite"],
             Stage::Fuzz => &["fuzz", "distortion", "multi-effect suite", "capture loader"],
             Stage::Overdrive => &[
@@ -77,7 +76,6 @@ impl Stage {
                 "multi-effect suite",
                 "capture loader",
             ],
-            Stage::Other => &["multi-effect suite", "capture loader"],
             Stage::Gate => &["noise gate", "multi-effect suite"],
             Stage::Amp => &["amp sim", "preamp", "multi-effect suite", "capture loader"],
             Stage::Cabinet => &[
@@ -414,9 +412,7 @@ const CAPTURES: &str = "capture loader";
 /// Where a model inside a plugin goes: its real gear's name, or the plugin's own name for it
 /// ("70s Chorus" for a Boss CE-1).
 fn model_stage(m: &Finding) -> Option<Stage> {
-    stage_of(&m.kind, &m.gear)
-        .filter(|s| *s != Stage::Other)
-        .or_else(|| stage_of(&m.kind, &format!("{} {}", m.gear, m.model)))
+    stage_of(&m.kind, &m.gear).or_else(|| stage_of(&m.kind, &format!("{} {}", m.gear, m.model)))
 }
 
 /// The one word for what a block does ("chorus", "delay"), to find a suite's models for it by.
@@ -455,11 +451,11 @@ pub fn effect_word(stage: Stage, gear: Option<&str>) -> Option<&'static str> {
         Stage::Modulation => "modulation",
         Stage::Delay => "delay",
         Stage::Reverb => "reverb",
-        Stage::Other => return None,
     })
 }
 
-/// Where gear the sources name goes. Guitars, pickups, strings and tuning aren't plugins.
+/// Where gear the sources name goes. Guitars, pickups, strings and tuning aren't plugins, and
+/// neither is gear that isn't a known kind of effect.
 pub fn stage_of(kind: &str, gear: &str) -> Option<Stage> {
     match kind {
         "amp" => return Some(Stage::Amp),
@@ -568,7 +564,8 @@ pub fn stage_of(kind: &str, gear: &str) -> Option<Stage> {
     } else if has(&["eq", "equalizer", "graphic"]) {
         Stage::Eq
     } else {
-        Stage::Other
+        // Gear GigEyes can't place (a talk box, a tuner, a wireless) has no plugin to stand in.
+        return None;
     };
     Some(stage)
 }
@@ -849,9 +846,7 @@ mod tests {
         };
         assert_eq!(only(Stage::Modulation), ["AmpliTube 5"]);
         assert_eq!(only(Stage::Delay), ["AmpliTube 5"]);
-        let talk = &at(Stage::Other).picks[0];
-        assert_eq!((talk.plugin.as_str(), talk.capture), ("TONE3000", true));
-        assert_eq!(talk.model, "MXR M222 Talk Box capture");
+        assert_eq!(chain.len(), 3, "no block for the talk box");
         let amp = only(Stage::Amp);
         assert_eq!(
             amp.last(),
@@ -901,8 +896,12 @@ mod tests {
         ];
         let chain = build(&findings, &k, &rig, &tone(12.0));
         let first = |stage| &chain.iter().find(|b| b.stage == stage).unwrap().picks[0];
-        let talk = first(Stage::Other);
-        assert_eq!((talk.plugin.as_str(), talk.capture), ("TONE3000", true));
+        assert!(
+            chain
+                .iter()
+                .all(|b| !b.picks.iter().any(|p| p.model.contains("Talk Box"))),
+            "a talk box isn't a guitar plugin, so nothing is suggested for it"
+        );
         let amp = first(Stage::Amp);
         assert_eq!(
             (amp.plugin.as_str(), amp.model.as_str(), amp.capture),
@@ -919,7 +918,6 @@ mod tests {
             effect_word(Stage::Modulation, Some("Chorus pedal")),
             Some("chorus")
         );
-        assert_eq!(effect_word(Stage::Other, Some("MXR M222 Talk Box")), None);
     }
 
     #[test]
@@ -931,7 +929,8 @@ mod tests {
         assert_eq!(at("MXR Phase 90"), Some(Stage::Modulation));
         assert_eq!(at("Boss DD-3"), Some(Stage::Delay));
         assert_eq!(at("DigiTech Whammy"), Some(Stage::Pitch));
-        assert_eq!(at("Mystery Box"), Some(Stage::Other));
+        assert_eq!(at("Mystery Box"), None);
+        assert_eq!(at("MXR M222 Talk Box"), None);
         assert_eq!(stage_of("strings", "Ernie Ball 10-46"), None);
     }
 }

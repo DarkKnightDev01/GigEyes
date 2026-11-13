@@ -70,7 +70,6 @@ fn section_words(stage: Stage) -> &'static [&'static str] {
         Stage::Eq => &["eq"],
         Stage::Wah => &["wah"],
         Stage::Pitch => &["pitch", "octave", "whammy"],
-        Stage::Other => &[],
     }
 }
 

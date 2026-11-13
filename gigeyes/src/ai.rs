@@ -41,13 +41,13 @@ pub enum Task {
 
 pub const STOPPED: &str = "Stopped.";
 
-const PROMPT: &str = "You read one web page about the guitar sound of a song. List the guitar gear the page says was used on that song, its album or its tour: guitars, pickups, amps, cabinets, pedals, effects, strings and tuning.\n\
+const PROMPT: &str = "You read one web page about the guitar sound of a song. List the guitar gear the page says was used to record that song or its album: guitars, pickups, amps, cabinets, pedals, effects, strings and tuning.\n\
 For each piece of gear give:\n\
 - gear: make and model as the page writes them\n\
 - kind: one of the listed kinds\n\
 - settings: knob positions or other settings the page gives for it, or an empty string if it gives none\n\
 - quote: one sentence copied word for word from the page that names this gear. Never reword, shorten or fix it.\n\
-Leave out gear the page doesn't tie to this song, album or tour, gear used only by the bass player, singer or drummer, and anything you aren't sure the page says. If the page names no gear, return an empty list.";
+Leave out gear the page doesn't tie to this song or album (gear used only live or on other songs), gear used only by the bass player, singer or drummer, and anything you aren't sure the page says. If the page names no gear, return an empty list.";
 
 const PLUGIN_PROMPT: &str = "You read one web page about an audio plugin. Report what the page says about this plugin.\n\
 - type: what kind of plugin it is, from the list; \"unknown\" if the page doesn't say\n\
