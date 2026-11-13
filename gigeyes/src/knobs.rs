@@ -79,6 +79,12 @@ pub fn read(plugin: &Path) -> Result<Vec<Knob>, String> {
 
 /// The `--knobs` copy: print the knobs as one JSON line, or the reason as a JSON string.
 pub fn child(plugin: &Path) -> ! {
+    // A missing DLL or a crash must end this copy, not put up a Windows error box nobody sees.
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Diagnostics::Debug::*;
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    }
     // SAFETY: loading a plugin runs its code; that's why this is a separate process.
     let result = unsafe { load(plugin) };
     let line = match &result {
@@ -172,8 +178,15 @@ unsafe fn load(plugin: &Path) -> Result<Vec<Knob>, String> {
     use vst3::{ComPtr, ComWrapper, Interface};
 
     let path = binary(plugin).ok_or("Its plugin file for this PC is missing.")?;
-    let library = unsafe { libloading::Library::new(&path) }.map_err(|e| e.to_string())?;
-    let library = std::mem::ManuallyDrop::new(library);
+    // On Windows a plugin's own DLLs sit next to it: search there first, as hosts do.
+    #[cfg(windows)]
+    let library = unsafe {
+        use libloading::os::windows::{LOAD_WITH_ALTERED_SEARCH_PATH, Library};
+        Library::load_with_flags(&path, LOAD_WITH_ALTERED_SEARCH_PATH)
+    };
+    #[cfg(not(windows))]
+    let library = unsafe { libloading::Library::new(&path) };
+    let library = std::mem::ManuallyDrop::new(library.map_err(|e| e.to_string())?);
     unsafe {
         #[cfg(windows)]
         if let Ok(init) = library.get::<unsafe extern "system" fn() -> bool>(b"InitDll") {

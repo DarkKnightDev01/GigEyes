@@ -398,6 +398,43 @@ pub fn dial(
     out
 }
 
+/// When a plugin's own knob names can't be found: the knobs the source gives settings for, plus
+/// the ones every amp (or delay) has, under their usual names.
+pub fn usual(stage: Stage, source: &str) -> Vec<String> {
+    const FILLER: [&str; 22] = [
+        "at", "on", "to", "of", "the", "set", "around", "about", "o'clock", "oclock", "is",
+        "turned", "up", "down", "all", "way", "maxed", "max", "full", "off", "noon", "halfway",
+    ];
+    let mut names: Vec<String> = vec![];
+    let mut add = |name: &str| {
+        let mut letters = name.chars();
+        let Some(first) = letters.next() else {
+            return;
+        };
+        let name: String = first.to_uppercase().chain(letters).collect();
+        if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+            names.push(name);
+        }
+    };
+    for s in said(source) {
+        let label = s
+            .label
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+            .filter(|w| !FILLER.contains(w))
+            .collect::<Vec<_>>()
+            .join(" ");
+        add(role_of_label(&label).unwrap_or(&label));
+    }
+    let always: &[&str] = match stage {
+        Stage::Amp => &["gain", "bass", "middle", "treble", "presence"],
+        Stage::Delay => &["time"],
+        _ => &[],
+    };
+    always.iter().for_each(|a| add(a));
+    names
+}
+
 /// The role a source's label names: "gain on" → gain.
 fn role_of_label(label: &str) -> Option<&'static str> {
     words(label).iter().find_map(|w| role(w))
@@ -489,6 +526,28 @@ mod tests {
             ("80 Hz", From::Default)
         );
         assert_eq!(set.last().unwrap().from, From::Default);
+    }
+
+    #[test]
+    fn without_knob_names_the_sources_own_and_the_usual_ones_are_listed() {
+        let names = usual(Stage::Amp, "Mids 7, Bass: 6, Gain at 2 o'clock, Reverb 3");
+        assert_eq!(
+            names,
+            ["Middle", "Bass", "Gain", "Reverb", "Treble", "Presence"]
+        );
+        let list: Vec<(String, Option<&Knob>)> = names.into_iter().map(|n| (n, None)).collect();
+        let set = dial(
+            Stage::Amp,
+            &list,
+            "Mids 7, Bass: 6, Gain at 2 o'clock, Reverb 3",
+            &tone(),
+        );
+        assert_eq!(by(&set, "Middle").value, "7 of 10");
+        assert_eq!(by(&set, "Reverb").value, "3 of 10");
+        assert_eq!(by(&set, "Gain").value, "7 of 10");
+        assert_eq!(by(&set, "Treble").from, From::Recording);
+        assert_eq!(usual(Stage::Delay, ""), ["Time"]);
+        assert!(usual(Stage::Modulation, "").is_empty());
     }
 
     #[test]

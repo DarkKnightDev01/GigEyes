@@ -682,6 +682,29 @@ mod tests {
         }
     }
 
+    /// The real model on real pages, for checking prompts by hand. Needs the engine and Qwen3 8B
+    /// downloaded, and a saved `Research` file:
+    /// `PAGES=helix.json TASK=models:chorus cargo test real_ai -- --ignored --nocapture`
+    /// TASK is `song`, `plugin`, `models:<word>` or `knobs:<model>`.
+    #[test]
+    #[ignore]
+    fn real_ai() {
+        let pages = std::fs::read_to_string(std::env::var("PAGES").unwrap()).unwrap();
+        let pages: Research = serde_json::from_str(&pages).unwrap();
+        let task = std::env::var("TASK").unwrap();
+        let (cancel, page) = (AtomicBool::new(false), AtomicUsize::new(0));
+        let started = Instant::now();
+        let out = session(&crate::hardware::QWEN3_8B, false, &cancel, |ai| match task
+            .split_once(':')
+        {
+            Some(("models", word)) => format!("{:#?}", ai.models(&pages, word)),
+            Some(("knobs", model)) => format!("{:#?}", ai.knobs(&pages, &pages.song, model)),
+            _ if task == "song" => format!("{:#?}", ai.read(&pages, Task::Song, &page)),
+            _ => format!("{:#?}", ai.read(&pages, Task::Plugin, &page)),
+        });
+        println!("{}\n{:?}", out.unwrap(), started.elapsed());
+    }
+
     #[test]
     fn around_keeps_the_text_near_the_model() {
         let text = format!(

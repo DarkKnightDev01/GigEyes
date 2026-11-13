@@ -562,19 +562,35 @@ impl App {
                 }
             ));
         }
+        let source = block.real.as_ref().map_or("", |r| r.settings.as_str());
+        // Whatever GigEyes can't find out about the plugin's knobs, the settings themselves still
+        // stand: the ones the source gives and, for an amp, the ones heard in the recording.
+        let or_usual = |why: String| {
+            let names: Vec<(String, Option<&knobs::Knob>)> = setting::usual(block.stage, source)
+                .into_iter()
+                .map(|n| (n, None))
+                .collect();
+            if names.is_empty() {
+                return Knobs::Missing(why);
+            }
+            let from = format!(
+                "{why} The knobs are listed under their usual names; yours may be called something else."
+            );
+            Knobs::List(setting::dial(block.stage, &names, source, tone), from)
+        };
         let doing = |fallback: String| Knobs::Wait(self.knob_doing.clone().unwrap_or(fallback));
         if let Some(word) = self.wants_models(block, pick) {
             let (key, plugin) = (model_key(&pick.plugin, word), &pick.plugin);
             return if self.knowledge.searched.contains(&key) {
-                Knobs::Missing(format!(
+                or_usual(format!(
                     "Couldn't find which {word} models {plugin} has. Add one in it and set it by ear."
                 ))
             } else if let Some(e) = self.knob_failed.get(&key) {
-                Knobs::Missing(format!(
+                or_usual(format!(
                     "Couldn't look up the {word} models of {plugin}: {e}"
                 ))
             } else if !can {
-                Knobs::Missing(format!(
+                or_usual(format!(
                     "GigEyes can look up which {word} models {plugin} has and what to set on one. That needs the Tavily key and the local AI, both in Settings."
                 ))
             } else {
@@ -585,20 +601,18 @@ impl App {
         let from = match &names {
             setting::Names::Read => {
                 return match self.knob_failed.get(&pick.plugin) {
-                    Some(e) => {
-                        Knobs::Missing(format!("Couldn't read the knobs of {}: {e}", pick.plugin))
-                    }
+                    Some(e) => or_usual(format!("Couldn't read the knobs of {}: {e}", pick.plugin)),
                     None => doing(format!("Reading the knobs of {}…", pick.plugin)),
                 };
             }
             setting::Names::Web => {
                 let failed = self.knob_failed.get(&model_key(&pick.plugin, &pick.model));
                 return match failed {
-                    Some(e) => Knobs::Missing(format!(
+                    Some(e) => or_usual(format!(
                         "Couldn't look up the knobs of the {} in {}: {e}",
                         pick.model, pick.plugin
                     )),
-                    None if !can => Knobs::Missing(format!(
+                    None if !can => or_usual(format!(
                         "{} doesn't show its knobs per model, so GigEyes looks the {} up in its manual. That needs the Tavily key and the local AI, both in Settings.",
                         pick.plugin, pick.model
                     )),
@@ -606,7 +620,7 @@ impl App {
                 };
             }
             setting::Names::Plugin(k) if k.is_empty() => {
-                return Knobs::Missing(if pick.model.is_empty() {
+                return or_usual(if pick.model.is_empty() {
                     format!("{} shows GigEyes no knobs.", pick.plugin)
                 } else {
                     format!(
@@ -620,7 +634,6 @@ impl App {
                 format!("Knobs of the {} from {}.", pick.model, domain(&found.url))
             }
         };
-        let source = block.real.as_ref().map_or("", |r| r.settings.as_str());
         let set = setting::dial(block.stage, &setting::list(&names), source, tone);
         Knobs::List(set, from)
     }
@@ -1098,7 +1111,7 @@ impl App {
     fn rig_view(&mut self, ui: &mut egui::Ui) {
         ui.label(semibold("Your rig", 22.0));
         ui.label(
-            RichText::new("Tick the plugins you play through, and the ones GigEyes should look up: it searches the web for what kind of plugin each one is, what it does and what real gear it models, the local AI reads the pages, and what it finds stays on this PC. GigEyes reads plugin names from disk; it never loads or changes them.")
+            RichText::new("Tick the plugins you play through, and the ones GigEyes should look up: it searches the web for what kind of plugin each one is, what it does and what real gear it models, the local AI reads the pages, and what it finds stays on this PC. Scanning reads plugin names from disk. Later, to list a plugin's knobs, GigEyes opens it once in the background; it never changes a plugin.")
                 .weak(),
         );
         ui.add_space(12.0);
@@ -1289,7 +1302,8 @@ impl App {
                                 }
                                 match knowledge.about(&plugin.name) {
                                     Some(known) if !known.models.is_empty() => {
-                                        let mut kind = known.kind().unwrap_or_default().to_string();
+                                        // As the chain sees it: TONE3000 is a capture loader whatever a page calls it.
+                                        let mut kind = chain::plugin_type(plugin, knowledge).unwrap_or_default();
                                         if let Some(first) = kind.get_mut(..1) {
                                             first.make_ascii_uppercase();
                                         }
@@ -3085,6 +3099,7 @@ fn settings_list(ui: &mut egui::Ui, key: &str, set: &[setting::Setting], from: &
                 });
         });
     }
+    ui.add_space(6.0);
     ui.label(RichText::new(from).size(12.0).weak());
 }
 
