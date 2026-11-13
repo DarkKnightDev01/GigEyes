@@ -289,9 +289,10 @@ fn read_pages(
     page: &AtomicUsize,
     cancel: &AtomicBool,
 ) -> Result<Vec<Finding>, String> {
-    // A page on the processor can take minutes; Stop ends it sooner by ending the server.
+    // A long page on the processor alone can take over 15 minutes. Stop ends it sooner by ending
+    // the server, so this only catches a server that hangs.
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(900)))
+        .timeout_global(Some(Duration::from_secs(PAGE_TIME)))
         .build()
         .into();
     let pages: Vec<&Source> = research
@@ -333,6 +334,9 @@ fn read_pages(
     }
     Ok(found)
 }
+
+/// Longest wait for one page part, in seconds.
+const PAGE_TIME: u64 = 3600;
 
 /// As much of a page as the model reads in one go: with the prompt and the answer it fits the
 /// 12,288-token context.
@@ -557,7 +561,7 @@ impl Session<'_> {
         model: &str,
     ) -> Result<(Vec<String>, String), String> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(900)))
+            .timeout_global(Some(Duration::from_secs(PAGE_TIME)))
             .build()
             .into();
         let schema = serde_json::json!({

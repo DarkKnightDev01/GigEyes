@@ -4,7 +4,10 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8.0.3**
+**New in 0.8.0.4**
+- On a PC without a graphics card the local AI now gets up to an hour per page instead of 15 minutes. Long pages, such as Helix's model list, were giving up with "couldn't read the pages".
+
+**In 0.8.0.3**
 - Settings a source writes without a space ("Gain5, Bass5") are no longer lost.
 
 **In 0.8.0.2: settings even when knobs can't be read**
