@@ -498,6 +498,112 @@ const KNOBS_PROMPT: &str = "You read part of a web page about an audio plugin. L
 - quote: the sentence or line copied word for word from the page that names this control of this model\n\
 Only this model's controls, not those of other models or of the plugin as a whole (no presets, tuner, input or output menus). If this part of the page doesn't list them, return an empty list.";
 
+const MODELS_PROMPT: &str = "You read part of a web page about an audio plugin with many models in it. List its models of one kind of effect.\n\
+- model: the plugin's own name for the model, exactly as the page writes it, e.g. \"70s Chorus\"\n\
+- gear: the real unit the page says it's based on, as the page writes it, e.g. \"BOSS CE-1\"; an empty string if the page says it's the plugin's own design or doesn't say\n\
+Only models of this kind of effect. Leave out amps, cabinets and other effects. If this part of the page lists none, return an empty list.";
+
+fn models_from(
+    agent: &ureq::Agent,
+    base: &str,
+    cancel: &AtomicBool,
+    pages: &Research,
+    word: &str,
+) -> Result<Vec<Finding>, String> {
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"models": {"type": "array", "maxItems": 20, "items": {
+            "type": "object",
+            "properties": {
+                "model": {"type": "string"},
+                "gear": {"type": "string"}
+            },
+            "required": ["model", "gear"]
+        }}},
+        "required": ["models"]
+    });
+    #[derive(Deserialize)]
+    struct Model {
+        model: String,
+        gear: String,
+    }
+    #[derive(Deserialize)]
+    struct Answer {
+        models: Vec<Model>,
+    }
+    let (mut asked, mut failed) = (0, 0);
+    let mut found: Vec<Finding> = vec![];
+    for source in &pages.sources {
+        let page = norm(&source.text);
+        for part in around(&source.text, word) {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(STOPPED.into());
+            }
+            asked += 1;
+            let user = format!(
+                "Plugin: {}\nEffect: {word}\nPage: {}\n\n{part}",
+                pages.song, source.title
+            );
+            let answer = chat(agent, base, MODELS_PROMPT, &user, schema.clone(), 1200)
+                .and_then(|a| serde_json::from_str::<Answer>(&a).map_err(|e| e.to_string()));
+            let Ok(answer) = answer else {
+                failed += 1;
+                continue;
+            };
+            for m in answer.models {
+                let (model, gear) = (m.model.trim(), m.gear.trim());
+                // The model's name must be on the page, and the unit it's based on right after it
+                // (a table row), so a guess doesn't pass for what the page says.
+                let Some(quote) = row(&page, model, gear) else {
+                    continue;
+                };
+                if model.chars().count() > 40 || found.iter().any(|f| norm(&f.model) == norm(model))
+                {
+                    continue;
+                }
+                found.push(Finding {
+                    gear: if gear.is_empty() { model } else { gear }.to_string(),
+                    kind: "effect".into(),
+                    settings: String::new(),
+                    quote,
+                    url: source.url.clone(),
+                    model: model.to_string(),
+                });
+            }
+        }
+    }
+    if cancel.load(Ordering::Relaxed) {
+        return Err(STOPPED.into());
+    }
+    if failed > 0 && failed == asked {
+        return Err("The local AI couldn't read the pages.".into());
+    }
+    Ok(found)
+}
+
+/// The text of `page` (normalised) from `model` to `gear`, where `gear` is named within a short
+/// table row's reach after it; just `model` when `gear` is empty. None when the page doesn't
+/// have them together.
+fn row(page: &str, model: &str, gear: &str) -> Option<String> {
+    const REACH: usize = 120;
+    let (model, gear) = (norm(model), norm(gear));
+    if model.is_empty() {
+        return None;
+    }
+    page.match_indices(&model).find_map(|(at, _)| {
+        if gear.is_empty() {
+            return Some(model.clone());
+        }
+        let mut end = (at + model.len() + REACH).min(page.len());
+        while !page.is_char_boundary(end) {
+            end -= 1;
+        }
+        page[at..end]
+            .find(&gear)
+            .map(|g| page[at..at + g + gear.len()].to_string())
+    })
+}
+
 /// The page around each mention of `name`, up to one part's worth: a manual is long and the
 /// model's controls are listed next to its name.
 fn around<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
@@ -538,18 +644,15 @@ fn around<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 impl Session<'_> {
-    /// The real gear `pages` say the plugin models, read only around each mention of `word`
-    /// ("chorus"): a suite's model list is long, and one effect's models sit together in it.
+    /// The `word` ("chorus") models of the plugin `pages` are about: the plugin's name for each
+    /// and the real unit it's based on. Read only around each mention of `word`: a suite's model
+    /// list is long, and one effect's models sit together in it.
     pub fn models(&self, pages: &Research, word: &str) -> Result<Vec<Finding>, String> {
-        let mut near = pages.clone();
-        for source in &mut near.sources {
-            source.text = around(&source.text, word).join("\n");
-        }
-        let found = self.read(&near, Task::Plugin, &AtomicUsize::new(0))?;
-        Ok(found
-            .into_iter()
-            .filter(|f| f.kind != TYPE && f.kind != FACT)
-            .collect())
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(PAGE_TIME)))
+            .build()
+            .into();
+        models_from(&agent, self.base, self.cancel, pages, word)
     }
 
     /// The controls of `model` in `plugin`, from the first of `pages` that lists at least two,
@@ -766,6 +869,44 @@ mod tests {
             keep(finding("Marshall", "Marshall"), &page, "").is_none(),
             "too short to be a quote"
         );
+    }
+
+    #[test]
+    fn a_suites_models_are_kept_only_as_the_page_pairs_them() {
+        let page = "Flanger\n\nMono, Stereo\n\nLine 6 Original\n\n70s Chorus\n\nMono, Stereo\n\nBOSS CE-1\n\nPlastiChorus\n\nMono, Stereo\n\nModded Arion SCH-Z chorus";
+        let pages = Research {
+            song: "Helix Native".into(),
+            sources: vec![Source {
+                title: "Helix models".into(),
+                url: "https://line6.com/helix-models/".into(),
+                snippet: String::new(),
+                text: page.into(),
+            }],
+            searched_at: 0,
+            findings: None,
+        };
+        let reply = r#"{"models": [
+            {"model": "70s Chorus", "gear": "BOSS CE-1", "quote": "70s Chorus | BOSS CE-1"},
+            {"model": "PlastiChorus", "gear": "Modded Arion SCH-Z chorus", "quote": ""},
+            {"model": "Trinity Chorus", "gear": "Dytronics Tri-Stereo Chorus", "quote": ""},
+            {"model": "PlastiChorus", "gear": "BOSS CE-1", "quote": ""}
+        ]}"#;
+        let (base, _) = fake_server(vec![reply]);
+        let agent: ureq::Agent = ureq::Agent::config_builder().build().into();
+        let found = models_from(&agent, &base, &AtomicBool::new(false), &pages, "chorus").unwrap();
+        let got: Vec<(&str, &str)> = found
+            .iter()
+            .map(|f| (f.model.as_str(), f.gear.as_str()))
+            .collect();
+        // Trinity Chorus isn't on the page, and PlastiChorus isn't a CE-1.
+        assert_eq!(
+            got,
+            [
+                ("70s Chorus", "BOSS CE-1"),
+                ("PlastiChorus", "Modded Arion SCH-Z chorus")
+            ]
+        );
+        assert_eq!(found[0].quote, "70s chorus mono, stereo boss ce-1");
     }
 
     /// A fake llama-server: answers each chat request with the next reply and keeps the first request body.

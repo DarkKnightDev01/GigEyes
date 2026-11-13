@@ -19,7 +19,8 @@ pub struct Knowledge {
     #[serde(default)]
     pub model_knobs: Vec<ModelKnobs>,
     /// "plugin\u{1f}chorus": the plugin's models for that effect were searched for, found or not.
-    #[serde(default)]
+    /// Saved under a new name since 0.8.2 reads model lists better, so earlier misses are retried.
+    #[serde(default, rename = "searched_models")]
     pub searched: std::collections::BTreeSet<String>,
 }
 
