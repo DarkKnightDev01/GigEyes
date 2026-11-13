@@ -18,6 +18,9 @@ pub struct Knowledge {
     /// The knobs of one model inside a plugin (an amp in a suite), found on the web.
     #[serde(default)]
     pub model_knobs: Vec<ModelKnobs>,
+    /// "plugin\u{1f}chorus": the plugin's models for that effect were searched for, found or not.
+    #[serde(default)]
+    pub searched: std::collections::BTreeSet<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -176,12 +179,41 @@ impl Knowledge {
             .unwrap_or_default()
             .as_secs();
         self.plugins.retain(|k| k.plugin != plugin);
+        // The models found per effect go with the old lookup: search for them again when needed.
+        self.searched
+            .retain(|s| s.split('\u{1f}').next() != Some(plugin));
         self.plugins.push(Known {
             plugin: plugin.to_string(),
             looked_up_at,
             models,
             profile: true,
         });
+    }
+
+    /// Add the models a search for one effect (`word`, "chorus") found in `plugin`, and note the
+    /// search so it isn't run again.
+    pub fn add_models(&mut self, plugin: &str, word: &str, found: Vec<Finding>) {
+        self.searched.insert(format!("{plugin}\u{1f}{word}"));
+        if self.about(plugin).is_none() {
+            self.plugins.push(Known {
+                plugin: plugin.to_string(),
+                looked_up_at: 0,
+                models: vec![],
+                profile: false,
+            });
+        }
+        let Some(known) = self.plugins.iter_mut().find(|k| k.plugin == plugin) else {
+            return;
+        };
+        for f in found {
+            let is_gear = f.kind != crate::ai::TYPE && f.kind != crate::ai::FACT;
+            let new = !known.models.iter().any(|m| {
+                m.gear.eq_ignore_ascii_case(&f.gear) && m.model.eq_ignore_ascii_case(&f.model)
+            });
+            if is_gear && new {
+                known.models.push(f);
+            }
+        }
     }
 
     /// The knobs of `model` in `plugin` from the web, if they were looked up.
@@ -541,6 +573,25 @@ mod tests {
         assert!(
             names("Gibson Les Paul", "guitar").is_empty(),
             "guitars aren't plugins"
+        );
+    }
+
+    #[test]
+    fn models_found_for_one_effect_are_added_once_and_searched_once() {
+        let mut k = looked_up();
+        let plugin = k.plugins[0].plugin.clone();
+        let before = k.about(&plugin).unwrap().models.len();
+        let chorus = model("Boss CE-1", "pedal", "70s Chorus");
+        k.add_models(&plugin, "chorus", vec![chorus.clone(), chorus.clone()]);
+        k.add_models(&plugin, "chorus", vec![chorus]);
+        assert_eq!(k.about(&plugin).unwrap().models.len(), before + 1);
+        assert!(k.searched.contains(&format!("{plugin}\u{1f}chorus")));
+        k.add_models("Never looked up", "delay", vec![]);
+        assert!(k.about("Never looked up").is_some_and(|n| !n.profile));
+        k.set(&plugin, vec![]);
+        assert!(
+            !k.searched.iter().any(|s| s.starts_with(&plugin)),
+            "a fresh lookup drops the added models, so they're searched for again"
         );
     }
 

@@ -115,7 +115,8 @@ pub fn search(key: &str, song: &str) -> Result<Research, String> {
 /// plugin's name.
 pub fn search_plugin(key: &str, name: &str, vendor: &str) -> Result<Research, String> {
     // "VST3 guitar" keeps a plain name like "Gateway" on the guitar plugin, not other products.
-    let query = format!("\"{name}\" {vendor} VST3 guitar plugin what it does sound based on");
+    let plain = plain(name);
+    let query = format!("\"{plain}\" {vendor} VST3 guitar plugin what it does sound based on");
     search_at(TAVILY, key, name, &query, 5, PLUGIN_TEXT_LIMIT)
 }
 
@@ -126,8 +127,31 @@ pub fn search_knobs(
     vendor: &str,
     model: &str,
 ) -> Result<Research, String> {
-    let query = format!("\"{plugin}\" \"{model}\" {vendor} controls knobs manual");
+    let plain = plain(plugin);
+    let query = format!("\"{plain}\" \"{model}\" {vendor} controls knobs manual");
     search_at(TAVILY, key, plugin, &query, 3, PLUGIN_TEXT_LIMIT)
+}
+
+/// Pages listing the models `plugin` has for one effect (`word`, "chorus") and what each is based on.
+pub fn search_models(
+    key: &str,
+    plugin: &str,
+    vendor: &str,
+    word: &str,
+) -> Result<Research, String> {
+    let plain = plain(plugin);
+    let query = format!("\"{plain}\" {vendor} {word} models list based on");
+    search_at(TAVILY, key, plugin, &query, 3, PLUGIN_TEXT_LIMIT)
+}
+
+/// The plugin's name without what the scan adds to it: "Helix Native (x64)" is "Helix Native"
+/// on every page about it.
+fn plain(name: &str) -> String {
+    let cut = name.split('(').next().unwrap_or(name);
+    cut.split_whitespace()
+        .filter(|w| !["x64", "x86", "64-bit", "64bit", "vst3"].contains(&w.to_lowercase().as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn search_at(
@@ -335,6 +359,13 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn plugin_names_are_searched_without_the_scans_extras() {
+        assert_eq!(plain("Helix Native (x64)"), "Helix Native");
+        assert_eq!(plain("AmpliTube 5 x64"), "AmpliTube 5");
+        assert_eq!(plain("TSE808"), "TSE808");
+    }
 
     #[test]
     fn titles_become_song_names() {

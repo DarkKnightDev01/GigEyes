@@ -534,6 +534,20 @@ fn around<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
 }
 
 impl Session<'_> {
+    /// The real gear `pages` say the plugin models, read only around each mention of `word`
+    /// ("chorus"): a suite's model list is long, and one effect's models sit together in it.
+    pub fn models(&self, pages: &Research, word: &str) -> Result<Vec<Finding>, String> {
+        let mut near = pages.clone();
+        for source in &mut near.sources {
+            source.text = around(&source.text, word).join("\n");
+        }
+        let found = self.read(&near, Task::Plugin, &AtomicUsize::new(0))?;
+        Ok(found
+            .into_iter()
+            .filter(|f| f.kind != TYPE && f.kind != FACT)
+            .collect())
+    }
+
     /// The controls of `model` in `plugin`, from the first of `pages` that lists at least two,
     /// with that page's address. Each name must be on the page in its quote.
     pub fn knobs(

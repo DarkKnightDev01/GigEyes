@@ -4,7 +4,14 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8: what to set on each plugin**
+**New in 0.8.0.1: the chain names things you can do**
+- **Suites get a model.** When Helix, AmpliTube or another suite stands in for a chorus, delay or other effect and GigEyes doesn't know which model in it does that, it now looks the suite's models for that effect up and names one ("pick 70s Chorus"), then finds that model's knobs. Before, the block said only "shows GigEyes no knobs".
+- **AmpliTube is no longer told to "find a capture".** Its pages mention ToneX, which made GigEyes take it for a capture loader. Loaders are now recognised by name only (TONE3000, NAM, ToneX).
+- **Capture loaders always say which capture to find.** A capture someone uploaded ("V30 1960") is no longer shown as a model to pick. The block says to find a capture of the named amp or pedal, and which settings it should be made near.
+- **"A chorus pedal" isn't a model.** When a source names only a kind of pedal, the block says so ("Any chorus pedal works") instead of "None of your plugins models the Chorus pedal".
+- Plugin names are searched without "(x64)".
+
+**In 0.8: what to set on each plugin**
 - **Every block lists its knobs.** Click a block and it shows the knobs to turn, with the value for each, and folds the rest under "Leave at default". Each value says where it comes from: a source, the recording, or nothing (default).
 - **GigEyes reads your plugins' own knobs.** It opens each plugin in a separate background process and reads its knob names, ranges and defaults, so the list uses the plugin's own names and scale (e.g. "6 of 10" or "0.4 s"). The plugin isn't changed, and a plugin that hangs is left alone after 40 seconds.
 - **Suites look the model up.** Helix, AmpliTube and other multi-effect suites don't show their knobs per model, so GigEyes searches the model's manual and lets the local AI pick out its knobs (needs the Tavily key and the local AI).

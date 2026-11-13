@@ -239,10 +239,13 @@ enum KnobNews {
     Now(String),
     Read(String, Result<Vec<knobs::Knob>, String>),
     Model(String, String, Result<(Vec<String>, String), String>),
+    /// The models a suite has for one effect: plugin, the effect's word, what the pages name.
+    Models(String, String, Result<Vec<ai::Finding>, String>),
     Finished,
 }
 
-/// What `knob_failed` keeps a failed model lookup under.
+/// What `knob_failed` keeps a failed lookup under: of a model's knobs, or (with the effect's word
+/// for `model`) of a suite's models for an effect. `Knowledge::searched` uses the same key.
 fn model_key(plugin: &str, model: &str) -> String {
     format!("{plugin}\u{1f}{model}")
 }
@@ -519,6 +522,21 @@ impl App {
         }
     }
 
+    /// "chorus" when the block's plugin is a suite (Helix, AmpliTube) and no model in it is known
+    /// for the job: the word to search its models by.
+    fn wants_models(&self, block: &chain::Block, pick: &chain::Pick) -> Option<&'static str> {
+        if pick.capture || !pick.model.is_empty() {
+            return None;
+        }
+        let plugin = self.rig.iter().flatten().find(|p| p.name == pick.plugin)?;
+        let suite =
+            chain::plugin_type(plugin, &self.knowledge).as_deref() == Some("multi-effect suite");
+        let gear = block.real.as_ref().map(|r| r.gear.as_str());
+        suite
+            .then(|| chain::effect_word(block.stage, gear))
+            .flatten()
+    }
+
     /// Under the chain: the open block's gear, the plugin and model to use, and where it comes from.
     /// The knobs of a block's plugin with what to set each to, or what GigEyes is doing to find
     /// them, or why it can't.
@@ -532,7 +550,37 @@ impl App {
         let (Some(pick), State::Done(_, tone)) = (pick, &self.state) else {
             return Knobs::None;
         };
+        if pick.capture {
+            // The loader's own knobs (input, output) aren't the captured unit's.
+            return Knobs::Missing(format!(
+                "A capture's sound is fixed, so there are no knobs of the unit to turn. Leave {}'s own knobs at default{}",
+                pick.plugin,
+                if block.settings.is_empty() {
+                    "."
+                } else {
+                    ", and look for a capture made close to these settings:"
+                }
+            ));
+        }
         let doing = |fallback: String| Knobs::Wait(self.knob_doing.clone().unwrap_or(fallback));
+        if let Some(word) = self.wants_models(block, pick) {
+            let (key, plugin) = (model_key(&pick.plugin, word), &pick.plugin);
+            return if self.knowledge.searched.contains(&key) {
+                Knobs::Missing(format!(
+                    "Couldn't find which {word} models {plugin} has. Add one in it and set it by ear."
+                ))
+            } else if let Some(e) = self.knob_failed.get(&key) {
+                Knobs::Missing(format!(
+                    "Couldn't look up the {word} models of {plugin}: {e}"
+                ))
+            } else if !can {
+                Knobs::Missing(format!(
+                    "GigEyes can look up which {word} models {plugin} has and what to set on one. That needs the Tavily key and the local AI, both in Settings."
+                ))
+            } else {
+                doing(format!("Finding the {word} models in {plugin}…"))
+            };
+        }
         let names = setting::names(block.stage, pick, &self.knowledge);
         let from = match &names {
             setting::Names::Read => {
@@ -619,6 +667,14 @@ impl App {
                         }
                     };
                     let what = match (&pick, &block.real) {
+                        (Some(p), Some(real)) if !p.capture && !knowledge::real_gear(&real.gear) => {
+                            format!(
+                                "The sources name a {}, not which one. Load {}{}.",
+                                plain_gear(&real.gear),
+                                p.plugin,
+                                model(p)
+                            )
+                        }
                         (Some(p), Some(real)) if p.capture => format!(
                             "None of your plugins models the {}. Load {} and find a capture of it: people upload captures of real gear, so search for \"{}\".",
                             real.gear, p.plugin, real.gear
@@ -1430,6 +1486,14 @@ impl App {
                         });
                         self.rig_error = self.knowledge.save().err();
                     }
+                    KnobNews::Models(plugin, word, Ok(found)) => {
+                        self.knowledge.add_models(&plugin, &word, found);
+                        self.rig_error = self.knowledge.save().err();
+                    }
+                    KnobNews::Models(_, _, Err(e)) if e == ai::STOPPED => {}
+                    KnobNews::Models(plugin, word, Err(e)) => {
+                        self.knob_failed.insert(model_key(&plugin, &word), e);
+                    }
                     KnobNews::Model(_, _, Err(e)) if e == ai::STOPPED => {}
                     KnobNews::Model(plugin, model, Err(e)) => {
                         self.knob_failed.insert(model_key(&plugin, &model), e);
@@ -1447,10 +1511,28 @@ impl App {
         }
         let mut reads: Vec<(String, PathBuf)> = vec![];
         let mut models: Vec<(String, String, String)> = vec![];
+        let mut finds: Vec<(String, String, &'static str)> = vec![];
+        let vendor_of = |plugin: &str| {
+            let found = self.rig.iter().flatten().find(|p| p.name == plugin);
+            found.map(|p| p.vendor.clone()).unwrap_or_default()
+        };
         for block in &self.chain.1 {
             let Some(pick) = chosen(block, &self.chain_pick) else {
                 continue;
             };
+            if pick.capture {
+                continue; // nothing to set on a capture
+            }
+            if let Some(word) = self.wants_models(block, pick) {
+                let key = model_key(&pick.plugin, word);
+                let todo = (pick.plugin.clone(), vendor_of(&pick.plugin), word);
+                if !self.knowledge.searched.contains(&key)
+                    && !self.knob_failed.contains_key(&key)
+                    && !finds.contains(&todo)
+                {
+                    finds.push(todo);
+                }
+            }
             match setting::names(block.stage, pick, &self.knowledge) {
                 setting::Names::Read if !self.knob_failed.contains_key(&pick.plugin) => {
                     let path = self.rig.iter().flatten().find(|p| p.name == pick.plugin);
@@ -1465,14 +1547,11 @@ impl App {
                         .knob_failed
                         .contains_key(&model_key(&pick.plugin, &pick.model)) =>
                 {
-                    let vendor = self
-                        .rig
-                        .iter()
-                        .flatten()
-                        .find(|p| p.name == pick.plugin)
-                        .map(|p| p.vendor.clone())
-                        .unwrap_or_default();
-                    let todo = (pick.plugin.clone(), vendor, pick.model.clone());
+                    let todo = (
+                        pick.plugin.clone(),
+                        vendor_of(&pick.plugin),
+                        pick.model.clone(),
+                    );
                     if !models.contains(&todo) {
                         models.push(todo);
                     }
@@ -1504,7 +1583,7 @@ impl App {
         let Some(model) = choice.model.filter(model::is_downloaded) else {
             return;
         };
-        if models.is_empty()
+        if (models.is_empty() && finds.is_empty())
             || self.ai_job.is_some()
             || self.lookup_job.is_some()
             || self.tavily_key.trim().is_empty()
@@ -1515,6 +1594,19 @@ impl App {
         let key = self.tavily_key.clone();
         thread::spawn(move || {
             let ran = ai::session(&model, gpu, &cancel, |ai| {
+                for (plugin, vendor, word) in &finds {
+                    if cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let _ = tx.send(KnobNews::Now(format!(
+                        "Finding the {word} models in {plugin}…"
+                    )));
+                    ctx.request_repaint();
+                    let found = research::search_models(&key, plugin, vendor, word)
+                        .and_then(|pages| ai.models(&pages, word));
+                    let _ = tx.send(KnobNews::Models(plugin.clone(), word.to_string(), found));
+                    ctx.request_repaint();
+                }
                 for (plugin, vendor, name) in &models {
                     if cancel.load(Ordering::Relaxed) {
                         break;
@@ -1530,7 +1622,14 @@ impl App {
                 }
             });
             if let Err(e) = ran {
-                // The AI didn't start: every model waiting fails the same way.
+                // The AI didn't start: everything waiting fails the same way.
+                for (plugin, _, word) in &finds {
+                    let _ = tx.send(KnobNews::Models(
+                        plugin.clone(),
+                        word.to_string(),
+                        Err(e.clone()),
+                    ));
+                }
                 for (plugin, _, name) in &models {
                     let _ = tx.send(KnobNews::Model(
                         plugin.clone(),
@@ -2863,6 +2962,9 @@ fn block_card(
         (Some(real), Some(p)) if p.capture => {
             (format!("Find a capture of {}", real.gear), accent())
         }
+        (Some(real), Some(p)) if !p.exact && !knowledge::real_gear(&real.gear) => {
+            (format!("Any {} works", plain_gear(&real.gear)), muted())
+        }
         (Some(real), Some(p)) if !p.exact => (format!("Stand-in for {}", real.gear), accent()),
         (Some(real), _) => (real.gear.clone(), muted()),
         (None, _) => ("From the recording".to_string(), muted()),
@@ -2934,7 +3036,8 @@ fn settings_list(ui: &mut egui::Ui, key: &str, set: &[setting::Setting], from: &
     ui.label(semibold("Settings", 13.0));
     let summary = match (change.len(), leave.len()) {
         (0, _) => {
-            "Nothing says where these go: start them at their defaults and go by ear.".to_string()
+            "No source gives settings for this. Leave everything at default and adjust by ear."
+                .to_string()
         }
         (n, 0) => format!("Set {n}."),
         (n, m) => format!("Set {n}, leave the other {m} at default."),
@@ -2983,6 +3086,11 @@ fn settings_list(ui: &mut egui::Ui, key: &str, set: &[setting::Setting], from: &
         });
     }
     ui.label(RichText::new(from).size(12.0).weak());
+}
+
+/// "chorus pedal" from "Chorus pedal (model unknown)": a kind of gear, as it reads mid-sentence.
+fn plain_gear(gear: &str) -> String {
+    gear.split('(').next().unwrap_or(gear).trim().to_lowercase()
 }
 
 /// "Helix Native · Brit 2203 (stand-in)", for the swap menu.

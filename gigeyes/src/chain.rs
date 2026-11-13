@@ -169,7 +169,11 @@ pub fn build(
         }
         let mut picks: Vec<Pick> = vec![];
         for m in knowledge.who_models(&f.gear, &f.kind, rig) {
-            if !picks.iter().any(|p| p.plugin == m.plugin) {
+            // A capture loader's lookup lists captures people uploaded, not models it ships with.
+            let loader = rig.iter().any(|p| {
+                p.name == m.plugin && plugin_type(p, knowledge).as_deref() == Some(CAPTURES)
+            });
+            if !loader && !picks.iter().any(|p| p.plugin == m.plugin) {
                 let single = knowledge
                     .about(m.plugin)
                     .is_some_and(|k| k.gear().count() == 1);
@@ -264,10 +268,9 @@ fn add_stand_ins(
             continue;
         }
         let known = knowledge.about(&p.name);
-        let models_it =
-            known.is_some_and(|k| k.gear().any(|m| stage_of(&m.kind, &m.gear) == Some(stage)));
+        let models_it = known.is_some_and(|k| k.gear().any(|m| model_stage(m) == Some(stage)));
         let kind = plugin_type(p, knowledge);
-        let capture = kind.as_deref() == Some("capture loader");
+        let capture = kind.as_deref() == Some(CAPTURES);
         let rank = kind
             .and_then(|t| stage.types().iter().position(|s| *s == t))
             .or(models_it.then_some(stage.types().len()));
@@ -276,8 +279,8 @@ fn add_stand_ins(
         };
         if capture {
             // A capture of the very unit beats a different unit modelled; with no unit named
-            // there's nothing to search for, so it goes last.
-            if let Some(gear) = gear {
+            // ("a chorus pedal") there's nothing to search for, so it goes last.
+            if let Some(gear) = gear.filter(|g| crate::knowledge::real_gear(g)) {
                 fits.push((
                     0,
                     Pick {
@@ -290,17 +293,23 @@ fn add_stand_ins(
                 continue;
             }
         }
-        let model = known.map_or(String::new(), |k| {
-            let fitting: Vec<&Finding> = k
-                .gear()
-                .filter(|m| stage_of(&m.kind, &m.gear) == Some(stage))
-                .collect();
+        let model = known.filter(|_| !capture).map_or(String::new(), |k| {
+            let fitting: Vec<&Finding> =
+                k.gear().filter(|m| model_stage(m) == Some(stage)).collect();
             if fitting.len() == k.gear().count() && fitting.len() == 1 {
                 return String::new(); // the plugin is that one unit
             }
+            // A chorus for a chorus, not the suite's phaser; an amp with the recording's gain.
+            let word = effect_word(stage, gear);
+            let named = |m: &&&Finding| {
+                word.is_some_and(|w| format!("{} {}", m.gear, m.model).to_lowercase().contains(w))
+            };
             let best = fitting
                 .iter()
-                .find(|m| stage != Stage::Amp || amp_gain(&m.gear) == Some(gain))
+                .find(|m| match stage {
+                    Stage::Amp => amp_gain(&m.gear) == Some(gain),
+                    _ => named(m),
+                })
                 .or(fitting.first());
             best.map_or(String::new(), |m| {
                 if m.model.is_empty() {
@@ -320,7 +329,8 @@ fn add_stand_ins(
             },
         ));
     }
-    fits.sort_by_key(|(rank, p)| (*rank, !p.capture));
+    // Among equals: a capture of the unit, then a plugin known to have a model for the job.
+    fits.sort_by_key(|(rank, p)| (*rank, !p.capture, p.model.is_empty()));
     picks.extend(fits.into_iter().map(|(_, p)| p));
 }
 
@@ -339,17 +349,23 @@ pub fn plugin_type(plugin: &Plugin, knowledge: &Knowledge) -> Option<String> {
         .unwrap_or_default();
     let name = format!("{} {}", plugin.name, plugin.vendor).to_lowercase();
     let either = |terms: &[&str]| terms.iter().any(|t| name.contains(t) || facts.contains(t));
-    // "capture" only in the name: plenty of amp sims say they capture an amp's feel.
-    if name.contains("capture")
-        || either(&[
-            "tone3000",
-            "tonehunt",
-            "neural amp modeler",
-            "tonex",
-            "nam captures",
-        ])
+    // Only by name: plenty of amp sims say they capture an amp's feel, and AmpliTube's pages
+    // mention ToneX.
+    let compact: String = name.chars().filter(|c| c.is_alphanumeric()).collect();
+    if [
+        "capture",
+        "tone3000",
+        "tonehunt",
+        "neuralampmodeler",
+        "tonex",
+    ]
+    .iter()
+    .any(|t| compact.contains(t))
+        || name
+            .split(|c: char| !c.is_alphanumeric())
+            .any(|w| w == "nam")
     {
-        return Some("capture loader".into());
+        return Some(CAPTURES.into());
     }
     let looked_up = known
         .and_then(|k| k.kind())
@@ -391,6 +407,56 @@ pub fn plugin_type(plugin: &Plugin, knowledge: &Knowledge) -> Option<String> {
     .iter()
     .find(|(word, _)| vst.contains(word))
     .map(|(_, t)| t.to_string())
+}
+
+const CAPTURES: &str = "capture loader";
+
+/// Where a model inside a plugin goes: its real gear's name, or the plugin's own name for it
+/// ("70s Chorus" for a Boss CE-1).
+fn model_stage(m: &Finding) -> Option<Stage> {
+    stage_of(&m.kind, &m.gear)
+        .filter(|s| *s != Stage::Other)
+        .or_else(|| stage_of(&m.kind, &format!("{} {}", m.gear, m.model)))
+}
+
+/// The one word for what a block does ("chorus", "delay"), to find a suite's models for it by.
+/// None for an effect with no common name.
+pub fn effect_word(stage: Stage, gear: Option<&str>) -> Option<&'static str> {
+    const EFFECTS: [&str; 12] = [
+        "chorus",
+        "flanger",
+        "phaser",
+        "tremolo",
+        "vibrato",
+        "rotary",
+        "echo",
+        "octave",
+        "fuzz",
+        "overdrive",
+        "distortion",
+        "boost",
+    ];
+    let lower = gear.unwrap_or_default().to_lowercase();
+    if let Some(word) = EFFECTS.iter().find(|w| lower.contains(*w)) {
+        return Some(word);
+    }
+    Some(match stage {
+        Stage::Wah => "wah",
+        Stage::Compressor => "compressor",
+        Stage::Pitch => "pitch",
+        Stage::Fuzz => "fuzz",
+        Stage::Overdrive => "overdrive",
+        Stage::Distortion => "distortion",
+        Stage::Boost => "boost",
+        Stage::Gate => "noise gate",
+        Stage::Amp => "amp",
+        Stage::Cabinet => "cab",
+        Stage::Eq => "eq",
+        Stage::Modulation => "modulation",
+        Stage::Delay => "delay",
+        Stage::Reverb => "reverb",
+        Stage::Other => return None,
+    })
 }
 
 /// Where gear the sources name goes. Guitars, pickups, strings and tuning aren't plugins.
@@ -792,6 +858,68 @@ mod tests {
             Some(&"TONE3000"),
             "with no amp named, a capture loader goes last"
         );
+    }
+
+    #[test]
+    fn the_love_song_chain_names_things_you_can_do() {
+        // What 0.8.0 got wrong on a real rig: AmpliTube's pages mention ToneX, TONE3000's lookup
+        // lists an uploaded capture as a model, and Helix got no model for the chorus.
+        let rig = vec![
+            plugin("AmpliTube 5", ""),
+            plugin("TONE3000", ""),
+            plugin("Helix Native (x64)", ""),
+        ];
+        let mut k = Knowledge::default();
+        k.set(
+            "AmpliTube 5",
+            vec![
+                typed("amp sim"),
+                found("Loads ToneX captures too", crate::ai::FACT, ""),
+                found("Fender Twin Reverb", "amp", "American Tube Clean"),
+            ],
+        );
+        k.set(
+            "TONE3000",
+            vec![
+                typed("amp sim"),
+                found("Marshall JCM800 2203", "amp", "V30 1960"),
+            ],
+        );
+        k.set(
+            "Helix Native (x64)",
+            vec![
+                typed("amp sim"),
+                found("Peavey 5150", "amp", "PV Panama"),
+                found("MXR Phase 90", "pedal", "Script Mod Phase"),
+                found("Boss CE-1", "pedal", "70s Chorus"),
+            ],
+        );
+        let findings = vec![
+            found("MXR M222 Talk Box", "pedal", ""),
+            found("Marshall JCM800 2203", "amp", ""),
+            found("Chorus pedal", "effect", ""),
+        ];
+        let chain = build(&findings, &k, &rig, &tone(12.0));
+        let first = |stage| &chain.iter().find(|b| b.stage == stage).unwrap().picks[0];
+        let talk = first(Stage::Other);
+        assert_eq!((talk.plugin.as_str(), talk.capture), ("TONE3000", true));
+        let amp = first(Stage::Amp);
+        assert_eq!(
+            (amp.plugin.as_str(), amp.model.as_str(), amp.capture),
+            ("TONE3000", "Marshall JCM800 2203 capture", true),
+            "an uploaded capture's name is not a model to pick"
+        );
+        let chorus = first(Stage::Modulation);
+        assert_eq!(
+            (chorus.plugin.as_str(), chorus.model.as_str()),
+            ("Helix Native (x64)", "70s Chorus"),
+            "the suite's chorus, found by its own name, not its phaser"
+        );
+        assert_eq!(
+            effect_word(Stage::Modulation, Some("Chorus pedal")),
+            Some("chorus")
+        );
+        assert_eq!(effect_word(Stage::Other, Some("MXR M222 Talk Box")), None);
     }
 
     #[test]
