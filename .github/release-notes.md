@@ -4,7 +4,12 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8.1: every effect says how far to turn it**
+**New in 0.8.2: suites name the model to load**
+- **Helix and other suites now get their own model names right.** Looking up a suite's chorus (or delay, reverb…) models used to return the real pedals it copies but not the suite's name for them, so the block couldn't say what to load. It now asks only for that effect's models and keeps a model only where the page pairs it with the unit it's based on. For Helix it names "70s Chorus" (BOSS CE-1).
+- **About 5 times faster**, since the local AI no longer lists every amp on the page.
+- Lookups that found nothing before are tried again.
+
+**In 0.8.1: every effect says how far to turn it**
 - **Starting points.** When no source gives settings for a chorus, delay, reverb, drive or compressor, GigEyes no longer leaves the knobs at "default". It lists the usual knobs for that kind of effect with where players usually start (a chorus: rate 3, depth 5, mix 5 of 10; a reverb: decay 4, mix 2.5; a delay: feedback 3, mix 3, time from the song's tempo). They're marked "starting point": dial them in by ear from there.
 - **This works in AmpliTube and other suites even when GigEyes can't find which model to use.** Add any chorus (or delay, reverb) in the suite and start from the listed settings.
 - **You can see it working.** While it looks up a suite's models it says whether it's searching the web or the local AI is reading pages.
