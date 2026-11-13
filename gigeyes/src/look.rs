@@ -58,7 +58,7 @@ pub fn error() -> Color32 {
 pub const ON_ACCENT: Color32 = Color32::from_rgb(0x14, 0x13, 0x11);
 pub const RADIUS: u8 = 8;
 /// The version people see. Four parts, Windows style; Cargo's own version only allows three.
-pub const VERSION: &str = "0.8.0.2";
+pub const VERSION: &str = "0.8.0.3";
 /// Barlow (SIL Open Font License, see fonts/OFL.txt), with egui's own fonts behind it for missing glyphs.
 pub fn fonts() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
