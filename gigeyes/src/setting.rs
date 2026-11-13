@@ -265,7 +265,9 @@ fn said(settings: &str) -> Vec<Said> {
             };
             let label = lower
                 .split_whitespace()
-                .filter(|w| !w.chars().any(|c| c.is_ascii_digit()))
+                // "gain5" keeps "gain"; "6.5" and "400ms" go.
+                .map(|w| w.split(|c: char| c.is_ascii_digit()).next().unwrap_or(""))
+                .filter(|w| !w.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
             Said {
@@ -561,6 +563,15 @@ mod tests {
         assert_eq!(got[1].1, Some(10.0));
         assert_eq!(got[2].1, None);
         assert_eq!(got[3].1, Some(6.5));
+        // The local AI sometimes drops the space.
+        let squeezed: Vec<(String, Option<f32>)> = said("Gain5, Volume6.5")
+            .into_iter()
+            .map(|s| (s.label, s.value))
+            .collect();
+        assert_eq!(
+            squeezed,
+            [("gain".into(), Some(5.0)), ("volume".into(), Some(6.5))]
+        );
     }
 
     #[test]
