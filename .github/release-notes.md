@@ -4,7 +4,13 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8.3: step-by-step build list, and no more gear you can't use**
+**New in 0.8.4: GigEyes hears the delay and the reverb**
+- **Delay from the song itself.** GigEyes listens for an echo in the recording and sets the delay's time, feedback and mix from it. An echo is an exact copy of the sound, so a beat or repeated riff isn't mistaken for one.
+- **Reverb length from the song.** It times how fast the sound dies away after the notes stop and sets the reverb's decay from that. When the notes stop dead, it says the recording is dry and keeps the reverb low.
+- What it heard is shown under the tone, e.g. "120 BPM · an echo 375 ms after each note · about 2.1 s of reverb".
+- These come from the whole recording, so another instrument's echo or reverb counts too. Settings say so; use your ears to finish.
+
+**In 0.8.3: step-by-step build list, and no more gear you can't use**
 - **How to build it.** Under the chain there's now a numbered list in signal order: which plugin to add, which model or capture to load in it, and what to set each knob to. The last step says how to wire them in Gig Performer.
 - **No more talk boxes.** Gear GigEyes can't place in a guitar chain (a talk box, a tuner, a wireless) no longer gets a block.
 - **Captures only where they make sense.** TONE3000 is suggested for amps, cabs and drives, not for a compressor.

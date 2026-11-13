@@ -24,6 +24,42 @@ pub struct Tone {
     pub knobs: Vec<Knob>,
     /// Beats per minute, when the recording has a clear beat.
     pub tempo_bpm: Option<f32>,
+    /// How long the sound takes to die away by 60 dB at the fastest, in seconds: about the
+    /// reverb's decay time. None when too little of the recording dies away to tell.
+    pub reverb_s: Option<f32>,
+    /// A delay heard in the recording.
+    pub echo: Option<Echo>,
+}
+
+impl Tone {
+    /// "120 BPM · an echo 375 ms after each note · about 2.1 s of reverb": the time-based
+    /// things heard, in one line; empty when nothing was.
+    pub fn heard(&self) -> String {
+        let mut parts = vec![];
+        if let Some(bpm) = self.tempo_bpm {
+            parts.push(format!("{bpm:.0} BPM"));
+        }
+        if let Some(e) = self.echo {
+            parts.push(format!("an echo {:.0} ms after each note", e.ms));
+        }
+        match self.reverb_s {
+            Some(rt) if rt < 0.4 => parts.push("dry, the notes stop dead".into()),
+            Some(rt) => parts.push(format!("about {rt:.1} s of reverb")),
+            None => {}
+        }
+        parts.join(" · ")
+    }
+}
+
+/// A delay: copies of the sound at a fixed time after it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Echo {
+    pub ms: f32,
+    /// The first repeat's level against the dry sound, 0 to 1.
+    pub level: f32,
+    /// Each repeat's level against the one before, 0 to 1; None when the recording is too
+    /// short to hear a second repeat.
+    pub feedback: Option<f32>,
 }
 
 pub struct Knob {
@@ -42,6 +78,10 @@ const BLOCK: usize = 2048;
 const HOP: usize = 512;
 /// The tempo is read from the first four minutes or so: enough, and quick.
 const TEMPO_STEPS: usize = 20_000;
+/// Samples per frame for finding echoes: about 2.7 s, so a frame holds a sound and its repeat.
+const ECHO_FFT: usize = 1 << 17;
+/// Echoes are looked for in the first six minutes or so.
+const ECHO_FRAMES: usize = 250;
 
 /// Builds a Tone from audio fed in pieces, so a long concert never sits in memory whole.
 pub struct Analyzer {
@@ -65,6 +105,10 @@ pub struct Analyzer {
     attack_sum: f32,
     attack_len: usize,
     last: f32,
+    /// Loudness (energy) per HOP, for how fast the sound dies away.
+    envelope: Vec<f32>,
+    envelope_sum: f32,
+    echoes: Echoes,
 }
 
 impl Analyzer {
@@ -90,6 +134,9 @@ impl Analyzer {
             attack_sum: 0.0,
             attack_len: 0,
             last: 0.0,
+            envelope: vec![],
+            envelope_sum: 0.0,
+            echoes: Echoes::new(),
         }
     }
 
@@ -104,15 +151,18 @@ impl Analyzer {
             if self.attacks.len() < TEMPO_STEPS {
                 let change = s - self.last;
                 self.attack_sum += change * change;
+                self.envelope_sum += s * s;
                 self.attack_len += 1;
                 if self.attack_len == HOP {
                     self.attacks.push(self.attack_sum);
-                    (self.attack_sum, self.attack_len) = (0.0, 0);
+                    self.envelope.push(self.envelope_sum);
+                    (self.attack_sum, self.envelope_sum, self.attack_len) = (0.0, 0.0, 0);
                 }
             }
             self.last = s;
         }
         self.total += samples.len();
+        self.echoes.push(samples);
         self.pending.extend_from_slice(samples);
         while self.pending.len() >= FFT {
             self.add_frame();
@@ -132,6 +182,8 @@ impl Analyzer {
         let crest_db = crest(&self.loudness, self.peak);
         let mut tone = describe(self.power, crest_db, self.total as f32 / rate as f32, rate);
         tone.tempo_bpm = tempo(&self.attacks, rate);
+        tone.reverb_s = decay(&self.envelope, rate);
+        tone.echo = self.echoes.finish(rate);
         tone
     }
 
@@ -301,6 +353,164 @@ fn describe(power: Vec<f32>, crest_db: f32, seconds: f32, rate: u32) -> Tone {
         verdict,
         knobs: vec![gain, bass, middle, treble, presence],
         tempo_bpm: None,
+        reverb_s: None,
+        echo: None,
+    }
+}
+
+/// The reverb's decay time from how fast the sound dies away: a note can stop at once, but its
+/// reverb can't fade faster than the reverb's own decay. So the fastest fades, not the typical
+/// ones, give it. Each fade is timed from 15 to 35 dB down, past the note itself and into its
+/// tail. In seconds to fall 60 dB.
+fn decay(envelope: &[f32], rate: u32) -> Option<f32> {
+    let step = HOP as f32 / rate as f32;
+    let db: Vec<f32> = envelope
+        .iter()
+        .map(|e| 10.0 * (e / HOP as f32 + 1e-12).log10())
+        .collect();
+    // Five steps (about 50 ms) averaged, so a reverb tail's grain doesn't end a fade.
+    let db: Vec<f32> = db.windows(5).map(|w| w.iter().sum::<f32>() / 5.0).collect();
+    let loudest = db.iter().copied().fold(f32::MIN, f32::max);
+    let mut rates = vec![];
+    let mut i = 1;
+    while i + 1 < db.len() {
+        let top = db[i];
+        // A fade starts at a peak in the louder part of the recording.
+        if top < loudest - 25.0 || top < db[i - 1] || top < db[i + 1] {
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j + 1 < db.len() && db[j + 1] <= db[j] + 0.5 && db[j] > top - 40.0 {
+            j += 1;
+        }
+        let first = (i..=j).find(|&k| db[k] <= top - 15.0);
+        let last = (i..=j).find(|&k| db[k] <= top - 35.0);
+        if let (Some(a), Some(b)) = (first, last) {
+            rates.push((db[a] - db[b]) / ((b - a).max(1) as f32 * step));
+        }
+        i = j.max(i + 1);
+    }
+    if rates.len() < 3 {
+        return None;
+    }
+    rates.sort_by(f32::total_cmp);
+    // The 80th percentile: the fastest fades, past a stray few.
+    let fastest = rates[(rates.len() * 4 / 5).min(rates.len() - 1)];
+    Some(60.0 / fastest)
+}
+
+/// Finds a delay from the cepstrum: an echo is an exact copy of the sound, so the log spectrum
+/// ripples at a rate set by the delay time, and that ripple turns into a sharp peak at the
+/// delay time. Played notes that repeat are never exact copies, so a beat doesn't make one.
+struct Echoes {
+    fft: std::sync::Arc<dyn RealToComplex<f32>>,
+    window: Vec<f32>,
+    input: Vec<f32>,
+    output: Vec<realfft::num_complex::Complex<f32>>,
+    pending: Vec<f32>,
+    /// Summed log magnitude spectrum of the frames so far.
+    log: Vec<f32>,
+    frames: usize,
+}
+
+impl Echoes {
+    fn new() -> Self {
+        let fft = RealFftPlanner::<f32>::new().plan_fft_forward(ECHO_FFT);
+        let (input, output) = (fft.make_input_vec(), fft.make_output_vec());
+        Self {
+            window: (0..ECHO_FFT)
+                .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / ECHO_FFT as f32).cos())
+                .collect(),
+            log: vec![0.0; output.len()],
+            fft,
+            input,
+            output,
+            pending: vec![],
+            frames: 0,
+        }
+    }
+
+    fn push(&mut self, samples: &[f32]) {
+        if self.frames >= ECHO_FRAMES {
+            return;
+        }
+        self.pending.extend_from_slice(samples);
+        while self.pending.len() >= ECHO_FFT && self.frames < ECHO_FRAMES {
+            for ((x, w), s) in self.input.iter_mut().zip(&self.window).zip(&self.pending) {
+                *x = s * w;
+            }
+            self.pending.drain(..ECHO_FFT / 2);
+            self.fft
+                .process(&mut self.input, &mut self.output)
+                .expect("buffer sizes come from the planner");
+            let power: Vec<f32> = self.output.iter().map(|c| c.norm_sqr()).collect();
+            let top = power.iter().copied().fold(0.0, f32::max);
+            if top <= 0.0 {
+                continue; // silence
+            }
+            // Floored 100 dB down, so bins with nothing in them (above an MP3's cut-off) stay flat.
+            for (l, p) in self.log.iter_mut().zip(&power) {
+                *l += 0.5 * (p + top * 1e-10).ln();
+            }
+            self.frames += 1;
+        }
+    }
+
+    fn finish(self, rate: u32) -> Option<Echo> {
+        if self.frames == 0 {
+            return None;
+        }
+        let inverse = RealFftPlanner::<f32>::new().plan_fft_inverse(ECHO_FFT);
+        let mut spectrum: Vec<realfft::num_complex::Complex<f32>> = self
+            .log
+            .iter()
+            .map(|l| realfft::num_complex::Complex::new(l / self.frames as f32, 0.0))
+            .collect();
+        let mut cepstrum = inverse.make_output_vec();
+        inverse.process(&mut spectrum, &mut cepstrum).ok()?;
+        cepstrum.iter_mut().for_each(|c| *c /= ECHO_FFT as f32);
+        // Delays from a slapback (80 ms) to a long one (1.2 s), within the frame.
+        let short = (0.08 * rate as f32) as usize;
+        let long = ((1.2 * rate as f32) as usize).min(ECHO_FFT / 2 - 2);
+        let range = &cepstrum[short..long];
+        let mut sorted: Vec<f32> = range.to_vec();
+        sorted.sort_by(f32::total_cmp);
+        let median = sorted[sorted.len() / 2];
+        let mut spread: Vec<f32> = sorted.iter().map(|c| (c - median).abs()).collect();
+        spread.sort_by(f32::total_cmp);
+        let noise = 1.4826 * spread[spread.len() / 2];
+        let (at, &level) = range.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1))?;
+        // Far above the ripple of the music itself, and loud enough to hear.
+        if level < median + 10.0 * noise || level < 0.05 {
+            return None;
+        }
+        let lag = short + at;
+        // A real cepstrum splits each peak between +lag and −lag, so it shows half; and the
+        // window lets only part of a sound and its repeat into the same frame.
+        let overlap = |d: usize| {
+            let both: f32 = (0..ECHO_FFT - d)
+                .map(|i| self.window[i] * self.window[i + d])
+                .sum();
+            both / self.window.iter().map(|w| w * w).sum::<f32>()
+        };
+        let first = 2.0 * level / overlap(lag);
+        // The second repeat sits at twice the time. With repeats a, a·g, a·g²…, the cepstrum
+        // there is a(2g − a)/2, which gives g.
+        let feedback = (2 * lag + 2 < ECHO_FFT / 2).then(|| {
+            let second = cepstrum[2 * lag - 2..=2 * lag + 2]
+                .iter()
+                .copied()
+                .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+                .unwrap_or(0.0);
+            let second = 2.0 * second / overlap(2 * lag);
+            (second / first + first / 2.0).clamp(0.0, 0.95)
+        });
+        Some(Echo {
+            ms: lag as f32 / rate as f32 * 1000.0,
+            level: first.min(1.0),
+            feedback,
+        })
     }
 }
 
@@ -517,6 +727,104 @@ mod tests {
     fn no_tempo_without_a_beat() {
         assert_eq!(analyze(&noise(RATE as usize * 20), RATE).tempo_bpm, None);
         assert_eq!(analyze(&strums(120.0, 5.0), RATE).tempo_bpm, None);
+    }
+
+    /// Notes plucked from fresh noise each time, so no two are exact copies, cut off short, in
+    /// phrases of eight with a rest after each.
+    fn phrases(seconds: f32) -> Vec<f32> {
+        let n = (seconds * RATE as f32) as usize;
+        let hiss = noise(n + RATE as usize);
+        let mut out = vec![0.0; n];
+        let pitches = [82.4, 110.0, 146.8, 196.0, 246.9, 329.6, 220.0, 164.8];
+        let (note, bar) = (RATE as usize / 4, RATE as usize * 7 / 2);
+        for start in (0..n).step_by(note) {
+            let k = start / note;
+            if start % bar >= 8 * note {
+                continue; // the rest
+            }
+            let period = (RATE as f32 / pitches[k % 8]) as usize;
+            let mut string: Vec<f32> = hiss[(k * 977) % n..][..period].to_vec();
+            for i in 0..note.min(n - start) {
+                let s = string[i % period];
+                string[i % period] = 0.996 * 0.5 * (s + string[(i + 1) % period]);
+                // Cut off over 5 ms, 200 ms in.
+                let gate =
+                    ((0.205 * RATE as f32 - i as f32) / (0.005 * RATE as f32)).clamp(0.0, 1.0);
+                out[start + i] += s * gate;
+            }
+        }
+        out
+    }
+
+    /// Repeats `ms` later at `level`, each next one `feedback` as loud.
+    fn delayed(x: &[f32], ms: f32, level: f32, feedback: f32) -> Vec<f32> {
+        let d = (ms / 1000.0 * RATE as f32) as usize;
+        let mut wet = vec![0.0; x.len()];
+        for i in d..x.len() {
+            wet[i] = level * x[i - d] + feedback * wet[i - d];
+        }
+        x.iter().zip(&wet).map(|(a, b)| a + b).collect()
+    }
+
+    /// A small Schroeder reverb: four combs set to fall 60 dB in `rt` seconds, then two
+    /// all-passes to blur them.
+    fn reverb(x: &[f32], rt: f32) -> Vec<f32> {
+        let mut wet = vec![0.0; x.len()];
+        for ms in [29.7, 37.1, 41.1, 43.7] {
+            let d = (ms / 1000.0 * RATE as f32) as usize;
+            let g = 10f32.powf(-3.0 * ms / 1000.0 / rt);
+            let mut y = vec![0.0; x.len()];
+            for i in 0..x.len() {
+                y[i] = x[i] + if i >= d { g * y[i - d] } else { 0.0 };
+                wet[i] += y[i] / 4.0;
+            }
+        }
+        for ms in [5.0, 1.7] {
+            let d = (ms / 1000.0 * RATE as f32) as usize;
+            let mut y = vec![0.0; x.len()];
+            for i in 0..x.len() {
+                let back = if i >= d { y[i - d] } else { 0.0 };
+                let fwd = if i >= d { wet[i - d] } else { 0.0 };
+                y[i] = -0.7 * wet[i] + fwd + 0.7 * back;
+            }
+            wet = y;
+        }
+        x.iter().zip(&wet).map(|(a, b)| a + 0.3 * b).collect()
+    }
+
+    #[test]
+    fn hears_a_delay_its_time_and_repeats() {
+        let echo = analyze(&delayed(&phrases(30.0), 375.0, 0.4, 0.35), RATE)
+            .echo
+            .expect("a delay");
+        assert!((echo.ms - 375.0).abs() < 2.0, "{echo:?}");
+        assert!((echo.level - 0.4).abs() < 0.1, "{echo:?}");
+        let feedback = echo.feedback.expect("room for a second repeat");
+        assert!((feedback - 0.35).abs() < 0.12, "{echo:?}");
+    }
+
+    #[test]
+    fn no_delay_in_dry_playing_or_a_beat() {
+        assert_eq!(analyze(&phrases(30.0), RATE).echo, None);
+        assert_eq!(analyze(&strums(120.0, 30.0), RATE).echo, None);
+        assert_eq!(analyze(&noise(RATE as usize * 10), RATE).echo, None);
+    }
+
+    #[test]
+    fn hears_how_long_the_reverb_is() {
+        let dry = analyze(&phrases(30.0), RATE)
+            .reverb_s
+            .expect("fades to time");
+        assert!(dry < 0.4, "dry playing read as {dry} s");
+        for rt in [1.0, 2.5] {
+            let wet = analyze(&reverb(&phrases(30.0), rt), RATE)
+                .reverb_s
+                .expect("fades to time");
+            assert!(
+                (wet / rt - 1.0).abs() < 0.35,
+                "{rt} s reverb read as {wet} s"
+            );
+        }
     }
 
     #[test]

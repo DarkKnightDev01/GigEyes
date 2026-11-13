@@ -416,6 +416,11 @@ impl App {
         });
         ui.add_space(4.0);
         ui.label(semibold(&tone.verdict, 26.0));
+        let heard = tone.heard();
+        if !heard.is_empty() {
+            ui.add_space(4.0);
+            ui.label(RichText::new(heard).size(14.0).weak());
+        }
         ui.add_space(20.0);
         self.chain_view(ui, ctx);
         if self.research.is_some() {

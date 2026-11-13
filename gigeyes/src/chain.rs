@@ -699,6 +699,8 @@ mod tests {
             verdict: String::new(),
             knobs: vec![knob("Gain", 8.0), knob("Bass", 6.0)],
             tempo_bpm: Some(120.0),
+            reverb_s: None,
+            echo: None,
         }
     }
 

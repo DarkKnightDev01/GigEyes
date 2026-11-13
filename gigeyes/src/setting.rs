@@ -315,6 +315,28 @@ fn round(n: f32) -> String {
 }
 
 /// A delay time for the song's tempo, as the knob shows it.
+/// Below this many seconds the recording's notes stop dead: no reverb to speak of.
+const DRY: f32 = 0.4;
+
+/// `ms` as the knob shows a time: in seconds or milliseconds.
+fn ms_on(ms: f32, knob: Option<&Knob>) -> String {
+    if knob.is_some_and(|k| k.units == "s" || k.high.ends_with(" s")) {
+        format!("{:.2} s", ms / 1000.0)
+    } else {
+        format!("{ms:.0} ms")
+    }
+}
+
+/// A reverb decay of `rt` seconds: as a time where the knob shows one, else as a position, on a
+/// scale where noon is about 2 s and each doubling is a little over two numbers.
+fn seconds_on(rt: f32, knob: Option<&Knob>) -> String {
+    match knob {
+        Some(k) if k.units == "s" || k.high.ends_with(" s") => format!("{rt:.1} s"),
+        Some(k) if k.units == "ms" => format!("{:.0} ms", rt * 1000.0),
+        _ => on_knob((5.0 + 2.2 * (rt / 2.0).log2()).clamp(0.5, 10.0), knob),
+    }
+}
+
 fn delay_time(bpm: f32, knob: Option<&Knob>) -> (String, String) {
     let quarter = 60_000.0 / bpm;
     let why = format!(
@@ -373,7 +395,52 @@ pub fn dial(
                             )
                         })
                 }
-                (Stage::Delay, Some("time")) => tone.tempo_bpm.map(|bpm| delay_time(bpm, *knob)),
+                (Stage::Delay, Some("time")) => match tone.echo {
+                    Some(e) => Some((
+                        ms_on(e.ms, *knob),
+                        format!("From the recording: an echo {:.0} ms after the sound.", e.ms),
+                    )),
+                    None => tone.tempo_bpm.map(|bpm| delay_time(bpm, *knob)),
+                },
+                (Stage::Delay, Some("feedback")) => {
+                    tone.echo.and_then(|e| e.feedback).map(|g| {
+                        (
+                            on_knob(g * 10.0, *knob),
+                            format!(
+                                "From the recording: each repeat is about {:.0}% as loud as the one before.",
+                                g * 100.0
+                            ),
+                        )
+                    })
+                }
+                (Stage::Delay, Some("mix")) => tone.echo.map(|e| {
+                    // Half way on a mix knob is the repeat as loud as the dry sound.
+                    let wet = e.level / (1.0 + e.level);
+                    (
+                        on_knob(wet * 10.0, *knob),
+                        format!(
+                            "From the recording: the first repeat is about {:.0}% as loud as the note. Other instruments' echoes count too, so check by ear.",
+                            e.level * 100.0
+                        ),
+                    )
+                }),
+                (Stage::Reverb, Some("decay" | "time")) => tone.reverb_s.map(|rt| {
+                    (
+                        seconds_on(rt, *knob),
+                        format!(
+                            "From the recording: at its fastest the sound dies away in about {rt:.1} s, so the reverb can't be much shorter. The whole mix's reverb counts, so trust your ears over this."
+                        ),
+                    )
+                }),
+                (Stage::Reverb, Some("mix")) => tone
+                    .reverb_s
+                    .filter(|rt| *rt < DRY)
+                    .map(|_| {
+                        (
+                            on_knob(1.0, *knob),
+                            "From the recording: it sounds dry, the notes stop dead. Keep the reverb low.".to_string(),
+                        )
+                    }),
                 _ => None,
             };
             if let Some((value, why)) = measured {
@@ -553,6 +620,8 @@ mod tests {
                 m("Presence", 5.0),
             ],
             tempo_bpm: Some(120.0),
+            reverb_s: None,
+            echo: None,
         }
     }
 
@@ -686,6 +755,52 @@ mod tests {
         let db = knob("Treble", "-12", "12", "0", "dB");
         assert_eq!(on_knob(5.0, Some(&db)), "0 dB (5 of 10)");
         assert_eq!(on_knob(6.5, None), "6.5 of 10");
+    }
+
+    #[test]
+    fn a_heard_delay_and_reverb_set_their_knobs() {
+        let mut heard = tone();
+        heard.echo = Some(crate::analysis::Echo {
+            ms: 375.0,
+            level: 0.5,
+            feedback: Some(0.3),
+        });
+        heard.reverb_s = Some(2.0);
+        let names = |n: &[&str]| -> Vec<(String, Option<&Knob>)> {
+            n.iter().map(|n| (n.to_string(), None)).collect()
+        };
+        let delay = dial(
+            Stage::Delay,
+            None,
+            &names(&["Time", "Feedback", "Mix"]),
+            "",
+            &heard,
+        );
+        let got: Vec<(&str, From)> = delay.iter().map(|s| (s.value.as_str(), s.from)).collect();
+        assert_eq!(
+            got,
+            [
+                ("375 ms", From::Recording),
+                ("3 of 10", From::Recording),
+                ("3.3 of 10", From::Recording)
+            ]
+        );
+        let reverb = dial(Stage::Reverb, None, &names(&["Decay", "Mix"]), "", &heard);
+        assert_eq!(
+            (
+                by(&reverb, "Decay").value.as_str(),
+                by(&reverb, "Decay").from
+            ),
+            ("5 of 10", From::Recording)
+        );
+        assert_eq!(
+            by(&reverb, "Mix").from,
+            From::Start,
+            "a wet mix isn't measured"
+        );
+        heard.reverb_s = Some(0.2);
+        let dry = dial(Stage::Reverb, None, &names(&["Decay", "Mix"]), "", &heard);
+        assert_eq!(by(&dry, "Mix").value, "1 of 10");
     }
 
     #[test]
