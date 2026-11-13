@@ -4,7 +4,11 @@ Beta. Most of it works; some rough edges are left.
 
 Windows may say "Windows protected your PC" because the setup isn't code-signed yet. Click **More info → Run anyway**.
 
-**New in 0.8.0.1: the chain names things you can do**
+**New in 0.8.0.2: settings even when knobs can't be read**
+- **Amps and delays always list settings.** When GigEyes can't open a plugin to read its knobs (or the AI can't look a model up), it now lists the usual knobs (gain, bass, middle, treble, presence; time on a delay) with values from the sources or the recording, instead of only saying it has no knobs. Names may differ a little from your plugin's.
+- **Fewer plugins fail to open for knob reading.** Plugins that load their own DLLs from their folder now open, and a broken plugin no longer pops up a Windows error box.
+
+**In 0.8.0.1: the chain names things you can do**
 - **Suites get a model.** When Helix, AmpliTube or another suite stands in for a chorus, delay or other effect and GigEyes doesn't know which model in it does that, it now looks the suite's models for that effect up and names one ("pick 70s Chorus"), then finds that model's knobs. Before, the block said only "shows GigEyes no knobs".
 - **AmpliTube is no longer told to "find a capture".** Its pages mention ToneX, which made GigEyes take it for a capture loader. Loaders are now recognised by name only (TONE3000, NAM, ToneX).
 - **Capture loaders always say which capture to find.** A capture someone uploaded ("V30 1960") is no longer shown as a model to pick. The block says to find a capture of the named amp or pedal, and which settings it should be made near.
