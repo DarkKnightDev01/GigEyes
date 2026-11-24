@@ -1,0 +1,25 @@
+name: Plugin build
+
+on:
+  push:
+    paths: ["plugin/**", ".github/workflows/plugin.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Configure (MSVC)
+        run: cmake -S plugin -B build -A x64
+      - name: Build GigEyes.vst3, the standalone and the hosting test
+        run: cmake --build build --config Release --parallel
+      # Hosts a real VST3 (TestGain) in GigEyes and checks the audio, latency, state and IR.
+      - name: Hosting test
+        run: build/GigEyesTests_artefacts/Release/GigEyesTests.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GigEyes-plugin
+          path: |
+            build/GigEyes_artefacts/Release/VST3/
+            build/GigEyes_artefacts/Release/Standalone/GigEyes.exe
