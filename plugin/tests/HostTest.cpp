@@ -76,11 +76,98 @@ juce::File writeWav (const juce::String& name, const std::vector<float>& samples
     writer->writeFromAudioSampleBuffer (b, 0, b.getNumSamples());
     return file;
 }
+
+// GigEyesTests <a.vst3> <b.vst3> ...: hosts the user's own plugins in series and reports, per
+// plugin, whether it loads, opens its editor, keeps up in real time and restores its state.
+int realPlugins (const juce::StringArray& paths)
+{
+    GigEyesProcessor p;
+    prepare (p);
+    for (auto& path : paths)
+    {
+        juce::String error;
+        auto types = p.typesIn (path, error);
+        check (! types.isEmpty() && p.add (*types[0], error), "loads " + path + " " + error);
+    }
+    if (p.chain().empty())
+        return 1;
+
+    for (auto& e : p.chain())
+    {
+        auto* s = p.slot (e.node);
+        const auto before = juce::TopLevelWindow::getNumTopLevelWindows();
+        p.showEditor (e.node);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (1500);
+        check (juce::TopLevelWindow::getNumTopLevelWindows() == before + 1,
+               s->plugin->getName() + (s->plugin->hasEditor() ? ": its own editor opens" : ": no editor of its own, generic one opens"));
+        p.closeEditor (e.node);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (300);
+    }
+
+    // 10 s of a low E string-ish tone through the whole chain, timed against real time.
+    constexpr int seconds = 10, blocks = (int) (seconds * rate / block);
+    juce::AudioBuffer<float> buffer (2, block);
+    juce::MidiBuffer midi;
+    float peak = 0;
+    bool finite = true;
+    const auto start = juce::Time::getMillisecondCounterHiRes();
+    for (int b = 0; b < blocks; ++b)
+    {
+        for (int i = 0; i < block; ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, 0.3f * std::sin (juce::MathConstants<float>::twoPi * 82.4f * (float) (b * block + i) / (float) rate));
+        p.processBlock (buffer, midi);
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < block; ++i)
+            {
+                const auto v = buffer.getSample (ch, i);
+                finite = finite && std::isfinite (v);
+                peak = std::max (peak, std::abs (v));
+            }
+    }
+    const auto load = (juce::Time::getMillisecondCounterHiRes() - start) / (seconds * 10.0);
+    check (finite, "output has no NaN/inf");
+    check (peak > 1e-4f, "output not silent (peak " + juce::String (peak, 3) + ")");
+    check (load < 50, "chain uses " + juce::String (load, 1) + "% of real time (under 50% is safe)");
+    std::printf ("      latency reported to the host: %d samples\n", p.getLatencySamples());
+
+    const auto state = save (p);
+    GigEyesProcessor q;
+    prepare (q);
+    q.setStateInformation (state.getData(), (int) state.getSize());
+    check (q.chain().size() == p.chain().size(), "every slot comes back after reload");
+    for (size_t i = 0; i < std::min (p.chain().size(), q.chain().size()); ++i)
+    {
+        auto* a = p.slot (p.chain()[i].node);
+        auto* b = q.slot (q.chain()[i].node);
+        if (b == nullptr)
+        {
+            check (false, a->plugin->getName() + " restored: " + q.chain()[i].error);
+            continue;
+        }
+        juce::MemoryBlock before, after;
+        a->plugin->getStateInformation (before);
+        b->plugin->getStateInformation (after);
+        // Some plugins stamp their state with volatile data, so a byte difference is a warning only.
+        std::printf ("%s  %s settings after reload (%d bytes)\n", before == after ? "ok  " : "WARN",
+                     (a->plugin->getName() + (before == after ? ": identical" : ": differ")).toRawUTF8(), (int) after.getSize());
+    }
+    std::printf ("%s\n", failures == 0 ? "all passed" : "FAILED");
+    return failures == 0 ? 0 : 1;
+}
 } // namespace
 
-int main()
+int main (int argc, char** argv)
 {
     std::setvbuf (stdout, nullptr, _IONBF, 0);
+    if (argc > 1)
+    {
+        juce::ScopedJuceInitialiser_GUI juce;
+        juce::StringArray paths;
+        for (int i = 1; i < argc; ++i)
+            paths.add (argv[i]);
+        return realPlugins (paths);
+    }
     juce::ScopedJuceInitialiser_GUI juce;
 
     GigEyesProcessor p;

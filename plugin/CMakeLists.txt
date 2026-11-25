@@ -66,6 +66,7 @@ if(GIGEYES_TESTS)
     get_target_property(TEST_GAIN_PATH TestGain_VST3 JUCE_PLUGIN_ARTEFACT_FILE)
     target_compile_definitions(GigEyesTests PRIVATE ${GIGEYES_DEFINITIONS}
         JUCE_STANDALONE_APPLICATION=1
+        JUCE_MODAL_LOOPS_PERMITTED=1
         TEST_GAIN_PATH="${TEST_GAIN_PATH}")
     target_link_libraries(GigEyesTests PRIVATE ${GIGEYES_MODULES} juce::juce_recommended_config_flags)
     add_dependencies(GigEyesTests TestGain_VST3)
